@@ -1,0 +1,42 @@
+[tool.poetry]
+name = "ssdp-discovery-protocol"
+version = "0.1.0"
+description = "Implementation of Control4's Simple Device Discovery Protocol (SDDP)"
+authors = [ "Sam McKelvie <dev@mckelvie.org>" ]
+license = "MIT"
+keywords = [ "Control4", "SDDP", "SSDP", "UPnP", "protocol", "multicast", "UDP", "discovery", "network" ]
+readme = "README.md"
+homepage = "https://github.com/sammck/sddp-discovery-protocol"
+repository = "https://github.com/sammck/sddp-discovery-protocol.git"
+
+
+[tool.poetry.dependencies]
+python = "^3.8"
+#argcomplete = "^2.0.0"
+jq = "^1.2.2"
+colorama = "^0.4.4"
+typing-extensions = "^4.7.1"
+
+[tool.poetry.dev-dependencies]
+mypy = "^0.931"
+#dunamai = "^1.9.0"
+python-semantic-release = "^7.25.2"
+#pydoc-markdown = "^4.6.0"
+#doc2md = "^0.1.0"
+#Sphinx = "^4.4.0"
+#sphinx-markdown-builder = "^0.5.5"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+sddp = 'sddp_discovery_protocol.__main__:run'
+
+[tool.semantic_release]
+version_variable = 'sddp_discovery_protocol/version.py:__version__'
+version_toml = 'pyproject.toml:tool.poetry.version'
+branch = 'main'
+upload_to_pypi = false
+upload_to_release = true
+build_command = "pip install poetry && poetry build"
