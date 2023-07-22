@@ -5,10 +5,10 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Query projector",
+            "name": "Multicast server",
             "type": "python",
             "request": "launch",
-            "module": "jvc_projector",
+            "module": "sddp_discovery_protocol.multicast_server",
             "args": [ ]
         }
     ]

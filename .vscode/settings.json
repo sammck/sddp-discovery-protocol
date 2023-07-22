@@ -7,10 +7,7 @@
         "editor.insertSpaces": true,
         "editor.tabSize": 2
       },
-    "restructuredtext.confPath": "",
     "files.exclude": {
       "/trash": true
     },
-    "esbonio.server.enabled": true,
-    "esbonio.sphinx.confDir": ""
 }

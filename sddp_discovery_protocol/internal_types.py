@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2022 Samuel J. McKelvie
+# Copyright (c) 2023 Samuel J. McKelvie
 #
 # MIT License - See LICENSE file accompanying this package.
 #
@@ -32,6 +32,7 @@ from typing import (
     Mapping,
     MutableMapping,
     Sequence,
+    AsyncIterator
   )
 
 from typing_extensions import Self
@@ -48,3 +49,6 @@ else:
 
 JsonableDict = Dict[str, Jsonable]
 """A type hint for a simple JSON-serializable dict; i.e., Dict[str, Jsonable]"""
+
+HostAndPort = Tuple[str, int]
+"""A type hint for a host and port number; i.e., Tuple[str, int]"""
