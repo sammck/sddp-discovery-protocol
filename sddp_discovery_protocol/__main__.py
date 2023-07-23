@@ -142,7 +142,7 @@ class CommandHandler:
         self._parser = parser
         parser.add_argument('--traceback', "--tb", action='store_true', default=False,
                             help='Display detailed exception information')
-        parser.add_argument('--log-level', dest='log_level', default='info',
+        parser.add_argument('--log-level', dest='log_level', default='warning',
                             choices=['debug', 'info', 'warning', 'error', 'critical'],
                             help='''The logging level to use. Default: warning''')
         parser.set_defaults(func=self.cmd_bare)
