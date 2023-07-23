@@ -51,6 +51,7 @@ class CommandHandler:
     _argv: Optional[Sequence[str]]
     _parser: argparse.ArgumentParser
     _args: argparse.Namespace
+    _provide_traceback: bool = True
 
     def __init__(self, argv: Optional[Sequence[str]]=None):
         self._argv = argv
@@ -88,30 +89,32 @@ class CommandHandler:
             bind_addresses = None
         server = SddpServer(advertise_interval=advertise_interval, device_headers=headers, bind_addresses=bind_addresses)
         server.add_notify_handler(notify_handler)
-        async def sigint_cleanup() -> None:
-            try:
-                await asyncio.shield(server.final_result)
-                logging.debug("sigint_cleanup: Server exited without SIGINT/SIGTERM; exiting")
-            except asyncio.CancelledError:
-                logging.debug("sigint_cleanup: Detected SIGINT/SIGTERM, cancelling server")
-                if server.final_result.done():
-                    logging.debug("sigint_cleanup: Server already had final_result set--no effect")
-                server.set_final_exception(CmdExitError(1, "Server terminated with SIGINT or SIGTERM"))
-        loop = asyncio.get_running_loop()
-        sig_task = asyncio.create_task(sigint_cleanup())
-        for signal in (SIGINT, SIGTERM):
-            loop.add_signal_handler(signal, sig_task.cancel)
+        if not self._provide_traceback:
+            async def sigint_cleanup() -> None:
+                try:
+                    await asyncio.shield(server.final_result)
+                    logging.debug("sigint_cleanup: Server exited without SIGINT/SIGTERM; exiting")
+                except asyncio.CancelledError:
+                    logging.debug("sigint_cleanup: Detected SIGINT/SIGTERM, cancelling server")
+                    if server.final_result.done():
+                        logging.debug("sigint_cleanup: Server already had final_result set--no effect")
+                    server.set_final_exception(CmdExitError(1, "Server terminated with SIGINT or SIGTERM"))
+            loop = asyncio.get_running_loop()
+            sig_task = asyncio.create_task(sigint_cleanup())
+            for signal in (SIGINT, SIGTERM):
+                loop.add_signal_handler(signal, sig_task.cancel)
         try:
             async with server as s:
                 await s.wait_for_done()
         finally:
-            for signal in (SIGINT, SIGTERM):
-                loop.remove_signal_handler(signal)
-            sig_task.cancel()
-            try:
-                await sig_task
-            except asyncio.CancelledError:
-                pass
+            if not self._provide_traceback:
+                for signal in (SIGINT, SIGTERM):
+                    loop.remove_signal_handler(signal)
+                sig_task.cancel()
+                try:
+                    await sig_task
+                except asyncio.CancelledError:
+                    pass
         return 0
 
     async def cmd_version(self) -> int:
@@ -174,6 +177,7 @@ class CommandHandler:
         except ArgparseExitError as ex:
             return ex.exit_code
         traceback: bool = args.traceback
+        self._provide_traceback = traceback
 
         try:
             logging.basicConfig(
@@ -184,11 +188,6 @@ class CommandHandler:
             logging.debug(f"Running command {func.__name__}, tb = {traceback}")
             rc = await func()
             logging.debug(f"Command {func.__name__} returned {rc}")
-        except KeyboardInterrupt as ex:
-            if traceback:
-                raise
-            print("sddp: Interrupted by user", file=sys.stderr)
-            rc = 1
         except Exception as ex:
             if isinstance(ex, CmdExitError):
                 rc = ex.exit_code
