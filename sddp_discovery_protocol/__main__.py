@@ -19,13 +19,14 @@ from sddp_discovery_protocol.internal_types import *
 
 from sddp_discovery_protocol import (
     __version__ as pkg_version,
-    SddpSocket,
     SddpServer,
+    SddpClient,
     SddpDatagramSubscriber,
     SddpDatagram,
     SddpSocketBinding,
     CaseInsensitiveDict,
     SddpAdvertisementInfo,
+    DEFAULT_RESPONSE_WAIT_TIME,
   )
 class CmdExitError(RuntimeError):
     exit_code: int
@@ -62,6 +63,7 @@ class CommandHandler:
 
     async def cmd_server(self) -> int:
         async def notify_handler(info: SddpAdvertisementInfo) -> None:
+            results: List[JsonableDict] = []
             datagram = info.datagram
             header_dict: Dict[str, str] = dict(datagram.headers)
             summary: JsonableDict = {
@@ -74,6 +76,7 @@ class CommandHandler:
             }
             if datagram.body is not None and len(datagram.body) > 0:
                 summary["body"] = base64.b64encode(datagram.body).decode('ascii')
+
             print(json.dumps(summary, indent=2, sort_keys=True))
 
         advertise_interval: float = self._args.advertise_interval
@@ -115,6 +118,39 @@ class CommandHandler:
                     await sig_task
                 except asyncio.CancelledError:
                     pass
+        return 0
+
+    async def cmd_search(self) -> int:
+        response_wait_time: float = self._args.wait_time
+        search_pattern: str = self._args.pattern
+        include_error_responses: bool = self._args.include_error_responses
+        bind_addresses: Optional[List[str]] = self._args.bind_addresses
+        if not bind_addresses is None and len(bind_addresses) == 0:
+            bind_addresses = None
+        async with SddpClient(response_wait_time=response_wait_time, bind_addresses=bind_addresses) as client:
+            responses = await client.search(search_pattern=search_pattern, include_error_responses=include_error_responses)
+
+        results: List[JsonableDict] = []
+
+        for info in responses:
+            datagram = info.datagram
+            header_dict: Dict[str, str] = dict(datagram.headers)
+            summary: JsonableDict = {
+                "sddp_version": info.sddp_version,
+                "status_code": info.status_code,
+                "status": info.status,
+                "src_addr": f"{info.src_addr[0]}:{info.src_addr[1]}",
+                "local_addr": f"{info.socket_binding.unicast_addr[0]}:{info.socket_binding.unicast_addr[1]}",
+                "headers": header_dict,
+                "monotonic_time": info.monotonic_time,
+                "utc_time": info.utc_time.isoformat(),
+            }
+            if datagram.body is not None and len(datagram.body) > 0:
+                summary["body"] = base64.b64encode(datagram.body).decode('ascii')
+            results.append(summary)
+
+        print(json.dumps(results, indent=2, sort_keys=True))
+
         return 0
 
     async def cmd_version(self) -> int:
@@ -163,6 +199,19 @@ class CommandHandler:
         parser_server.add_argument('-b', '--bind', dest="bind_addresses", action='append', default=[],
                             help='''The local unicast IP address to bind to. May be repeated. Default: all local non-loopback unicast addresses.''')
         parser_server.set_defaults(func=self.cmd_server)
+
+        # ======================= search
+
+        parser_search = subparsers.add_parser('search', description="Search for SDDP devices")
+        parser_search.add_argument('--pattern', default="*",
+                            help='''The device pattern to search for. Default: "*"''')
+        parser_search.add_argument('--wait-time', type=float, default=DEFAULT_RESPONSE_WAIT_TIME,
+                            help=f'''The amount of time to wait for responses, in seconds. Default: {DEFAULT_RESPONSE_WAIT_TIME}''')
+        parser_search.add_argument('-b', '--bind', dest="bind_addresses", action='append', default=[],
+                            help='''The local unicast IP address to bind to. May be repeated. Default: all local non-loopback unicast addresses.''')
+        parser_search.add_argument('--include-error-responses', dest="include_error_responses", action='store_true', default=False,
+                            help='Include error responses in the output. Default: False')
+        parser_search.set_defaults(func=self.cmd_search)
 
         # ======================= version
 

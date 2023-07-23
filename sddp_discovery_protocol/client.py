@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 
 """
-An SDDP server that can:
+SddpClient -- An SDDP client that can:
 
-   1. Listen for datagrams received on the SDDP multicast address (Typically 239.255.255.250:1902)
-   2. Collect and maintain a dictionary of actively advertising SDDP devices, with associated metadata
-   3. Optionally, send out a periodic multicast message advertising a local device
-   4. Optionally, respond to SDDP discovery requests with a configured response
+  1. Send a discovery request to a multicast UDP address (typically 239.255.255.250:1902)
+  2. Receive and decode discovery response SddpDatagram's from remote nodes
+  3. Collect and return responses received within a configurable timeout period
 """
 
 from __future__ import annotations
@@ -15,360 +14,198 @@ from __future__ import annotations
 import asyncio
 from asyncio import Future
 import socket
-import struct
+import sys
+import re
+import time
+import datetime
 
 from sddp_discovery_protocol.internal_types import *
 from .pkg_logging import logger
 from .constants import SDDP_MULTICAST_ADDRESS, SDDP_PORT
 
 from .sddp_datagram import SddpDatagram
+from .sddp_socket import SddpSocket, SddpSocketBinding, SddpDatagramSubscriber
+from .util import get_local_ip_addresses
 
-MAX_QUEUE_SIZE = 1000
+class SddpResponseInfo:
+    socket_binding: SddpSocketBinding
+    """The socket binding on which the response was received"""
 
-class _SddpMulticastClientProtocol(asyncio.DatagramProtocol):
-    server: SddpMulticastServer
-    transport: Optional[asyncio.DatagramTransport] = None
+    src_addr: HostAndPort
+    """The source address of the response"""
 
-    def __init__(self, server: SddpMulticastServer):
-        self.server = server
+    datagram: SddpDatagram
+    """The response datagram"""
 
-    def connection_made(self, transport: asyncio.DatagramTransport):
-        """Called when a connection is made."""
-        assert self.transport is None
-        try:
-            self.transport = transport
-            self.server.connection_made(transport)
-        except BaseException as e:
-            self.server.set_final_exception(e)
-            raise
+    sddp_version: str
+    """The SDDP version string in the statement line (e.g. "1.0")"""
 
-    def datagram_received(self, data: bytes, addr: Tuple[str, int]):
-        """Called when some datagram is received."""
-        try:
-            self.server.datagram_received(data, addr)
-        except BaseException as e:
-            self.server.set_final_exception(e)
-            raise
+    status_code: int
+    """The status code in the statement line (e.g. 200)"""
 
-    def error_received(self, exc: Exception):
-        """Called when a send or receive operation raises an OSError.
+    status: str
+    """The status string in the statement line (e.g. "OK")"""
 
-        (Other than BlockingIOError or InterruptedError.)
-        """
-        try:
-            self.server.error_received(exc)
-        except BaseException as e:
-            self.server.set_final_exception(e)
-            raise
+    monotonic_time: float
+    """The local time (in seconds) since an arbitrary point in the past at which
+       the advertisement was received, as returned by time.monotonic(). This
+       value is useful for calculating the age of the advertisement and expiring
+       after Max-Age seconds."""
 
-    def connection_lost(self, exc: Optional[Exception]) -> None:
-        """Called when the connection is lost or closed."""
-        try:
-            self.server.connection_lost(exc)
-        except BaseException as e:
-            self.server.set_final_exception(e)
-            raise
-        self.transport = None
+    utc_time: datetime.datetime
+    """The UTC time at which the advertisement was received, as returned by
+        datetime.datetime.utcnow()."""
 
+    def __init__(
+            self,
+            socket_binding: SddpSocketBinding,
+            src_addr: HostAndPort,
+            datagram: SddpDatagram,
+            sddp_version: str,
+            status_code: int,
+            status: str
+          ) -> None:
+        self.socket_binding = socket_binding
+        self.src_addr = src_addr
+        self.datagram = datagram
+        self.sddp_version = sddp_version
+        self.status_code = status_code
+        self.status = status
+        self.monotonic_time = time.monotonic()
+        self.utc_time = datetime.datetime.utcnow()
 
-
-class SddpDatagramSubscriber:
-    server: SddpMulticastServer
-    queue: asyncio.Queue[Optional[Tuple[HostAndPort, SddpDatagram]]]
-    final_result: Future[None]
-    eos: bool = False
-    eos_exc: Optional[Exception] = None
-
-
-    def __init__(self, server: SddpMulticastServer, max_queue_size: int = MAX_QUEUE_SIZE):
-        self.server = server
-        self.queue = asyncio.Queue(max_queue_size)
-        self.final_result = Future()
-
-    async def __aenter__(self) -> SddpDatagramSubscriber:
-        await self.server.add_subscriber(self)
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb) -> bool:
-        await self.server.remove_subscriber(self)
-        self.set_final_result()
-        try:
-            # ensure that final_result has been awaited
-            await self.final_result
-        except BaseException as e:
-            pass
-        return False
-
-    async def iter_datagrams(self) -> AsyncIterator[Tuple[HostAndPort, SddpDatagram]]:
-        while True:
-            result = await self.receive()
-            if result is None:
-                break
-            yield result
-
-    def set_final_result(self) -> None:
-        if not self.final_result.done():
-            self.final_result.set_result(None)
-            if not self.queue is None:
-                # wake up any waiting tasks
-                try:
-                    self.queue.put_nowait(None)
-                except asyncio.QueueFull:
-                    # queue is full so waiters will wake up soon
-                    pass
-            self.eos = True
-            self.eos_exc = None
-
-    def set_final_exception(self, e: BaseException) -> None:
-        if not self.final_result.done():
-            self.final_result.set_exception(e)
-            if not self.queue is None:
-                # wake up any waiting tasks
-                try:
-                    self.queue.put(None)
-                except asyncio.QueueFull:
-                    # queue is full so waiters will wake up soon
-                    pass
-            self.eos = True
-            self.eos_exc = None
-
-    async def receive(self) -> Optional[Tuple[HostAndPort, SddpDatagram]]:
-        if self.final_result.done():
-            await self.final_result
-            return None
-        if self.eos and self.queue.empty():
-            if self.eos_exc is None:
-                self.set_final_result()
-            else:
-                self.set_final_exception(self.eos_exc)
-            await self.final_result
-            return None
-        try:
-          result =  await self.queue.get()
-          self.queue.task_done()
-          if result is None:
-              if not self.final_result.done():
-                  assert self.eos
-                  if self.eos_exc is None:
-                      self.set_final_result()
-                  else:
-                      self.set_final_exception(self.eos_exc)
-              await self.final_result
-              return None
-        except BaseException as e:
-            self.set_final_exception(e)
-            raise
-        return result
-
-    def on_datagram(self, addr: HostAndPort, datagram: SddpDatagram) -> None:
-        if not self.eos and not self.final_result.done():
-            try:
-                self.queue.put_nowait((addr, datagram))
-            except asyncio.QueueFull:
-                logger.warning(f"Queue full, dropping datagram from {addr}: {datagram}")
-
-    def on_end_of_stream(self, exc: Optional[Exception]=None) -> None:
-        if not self.eos and not self.final_result.done():
-            self.eos = True
-            self.eos_exc = exc
-            try:
-                # wake up any waiting tasks
-                self.queue.put_nowait(None)
-            except asyncio.QueueFull:
-                # queue is full so waiters will wake up soon
-                pass
-
-class SddpMulticastServer:
+DEFAULT_RESPONSE_WAIT_TIME = 3.0
+"""The default amount of time (in seconds) to wait for responses to come in."""
+class SddpClient(SddpSocket, AsyncContextManager['SddpClient']):
     """
-    An SDDP server that can:
+    An SDDP client that can:
 
-      1. Listen for datagrams received on the SDDP multicast address (Typically 239.255.255.250:1902)
-      2. Collect and maintain a dictionary of actively advertising SDDP devices, with associated metadata
-      3. Optionally, send out a periodic multicast message advertising a local device
-      4. Optionally, respond to SDDP discovery requests with a configured response
+      1. Send a discovery request to a multicast UDP address (typically 239.255.255.250:1902)
+      2. Receive and decode discovery response SddpDatagram's from remote nodes
+      3. Collect and return responses received within a configurable timeout period
     """
+    response_wait_time: float
+    """The amount of time (in seconds) to wait for all responses to come in. By default,
+       this is set to 3.0 seconds."""
 
-    receive_task: Optional[asyncio.Task[None]] = None
-    """A background task that receives datagrams and processes them."""
+    multicast_address: str = SDDP_MULTICAST_ADDRESS
+    """The multicast address to send requests to."""
 
-    transport: Optional[asyncio.DatagramTransport] = None
-    """The asyncio transport used to receive and send datagrams."""
+    multicast_port: int = SDDP_PORT
+    """The multicast port to send requests to."""
 
-    protocol: Optional[_SddpMulticastServerProtocol] = None
-    """the adapter between the asyncio transport and this class."""
+    bind_addresses: List[str]
+    """The local IP addresses to bind to. If None, all local IP addresses will be used."""
 
-    final_result: Future[None]
-    """A future that is set when the server is stopped."""
+    include_loopback: bool = False
+    """If True, loopback addresses will be included in the list of local IP addresses to bind to."""
 
-    datagram_subscribers: Set[SddpDatagramSubscriber] = set()
-    """A set of subscribers that wish to receive SDDP Datagrams."""
+    def __init__(
+            self,
+            search_pattern: str="*",
+            response_wait_time: float=DEFAULT_RESPONSE_WAIT_TIME,
+            multicast_address: str=SDDP_MULTICAST_ADDRESS,
+            multicast_port: int=SDDP_PORT,
+            bind_addresses: Optional[Iterable[str]]=None,
+            include_loopback: bool = False
+          ) -> None:
+        super().__init__()
+        self.search_pattern = search_pattern
+        self.response_wait_time = response_wait_time
+        self.multicast_address = multicast_address
+        self.multicast_port = multicast_port
+        self.include_loopback = include_loopback
+        if bind_addresses is None:
+            bind_addresses = get_local_ip_addresses(include_loopback=self.include_loopback)
+        self.bind_addresses = list(bind_addresses)
 
-    device_collector_task: Optional[asyncio.Task[None]] = None
+    #@override
+    async def add_socket_bindings(self) -> None:
+        """Abstract method that creates and binds the sockets that will be used to receive
+           and send datagrams (typically one per interface), and adds them with self.add_socket_binding().
+           Must be overridden by subclasses."""
 
-    def __init__(self):
-        self.final_result = Future()
-
-    async def add_subscriber(self, subscriber: SddpDatagramSubscriber) -> None:
-        self.datagram_subscribers.add(subscriber)
-
-    async def remove_subscriber(self, subscriber: SddpDatagramSubscriber) -> None:
-        self.datagram_subscribers.remove(subscriber)
-
-    async def start(self) -> None:
-        try:
-            loop = asyncio.get_running_loop()
-            addrinfo = socket.getaddrinfo(SDDP_MULTICAST_ADDRESS, SDDP_PORT)[0]
-            sock = socket.socket(addrinfo[0], socket.SOCK_DGRAM)
+        # Create a socket for each bind address
+        addrinfo = socket.getaddrinfo(self.multicast_address, self.multicast_port)[0]
+        address_family = addrinfo[0]
+        assert address_family in (socket.AF_INET, socket.AF_INET6)
+        is_ipv6 = address_family == socket.AF_INET6
+        group_bin = socket.inet_pton(address_family, addrinfo[4][0])
+        logger.debug(f"Creating socket bindings to {self.bind_addresses}")
+        for bind_address in self.bind_addresses:
+            sock = socket.socket(address_family, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-            group_bin = socket.inet_pton(addrinfo[0], addrinfo[4][0])
-            sock.bind(('', SDDP_PORT))
-            if addrinfo[0] == socket.AF_INET:
-                mreq = group_bin + struct.pack('=I', socket.INADDR_ANY)
-                sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-            else:
-                assert addrinfo[0] == socket.AF_INET6
-                mreq = group_bin + struct.pack('@I', 0)
-                sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_JOIN_GROUP, mreq)
-            transport, protocol = await loop.create_datagram_endpoint(
-                lambda: _SddpMulticastServerProtocol(self),
-                sock=sock
-              )
-            self.protocol = protocol
-            if self.transport is None:
-                self.transport = transport
-            else:
-                assert self.transport == transport
+            sock.bind((bind_address, 0))
+            bind_port = sock.getsockname()[1]
+            if sys.platform not in ( 'win32', 'cygwin' ):
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            socket_binding = SddpSocketBinding(sock, unicast_addr=sock.getsockname())
+            await self.add_socket_binding(socket_binding)
 
-            self.device_collector_task = asyncio.create_task(self._device_collector_task())
+    async def finish_start(self) -> None:
+        """Called after the socket is up and running.  Subclasses can override to do additional
+           initialization."""
+        pass
 
-        except BaseException as e:
-            self.set_final_exception(e)
-            raise
+    async def wait_for_dependents_done(self) -> None:
+        """Called after final_result has been awaited.  Subclasses can override to do additional
+           cleanup."""
+        pass
 
-    async def stop(self) -> None:
-        if self.transport is not None:
-            try:
-                self.transport.close()
-            except BaseException as e:
-                logger.error(f"Error closing transport: {e}")
-            self.transport = None
-
-    async def wait_for_done(self) -> None:
-        await self.final_result
-        if self.device_collector_task is not None:
-            await self.device_collector_task
-            self.device_collector_task = None
-
-    async def stop_and_wait(self) -> None:
-        await self.stop()
-        await self.wait_for_done()
-
-
-    def connection_made(self, transport: asyncio.DatagramTransport):
-        """Called when a connection is made."""
-        logger.debug("Connection made")
-        if self.transport is None:
-            self.transport = transport
-        else:
-            assert self.transport == transport
-
-    def datagram_received(self, data: bytes, addr: HostAndPort):
-        """Called when some datagram is received."""
+    async def search(self, search_pattern: str="*", include_error_responses: bool=False) -> List[SddpResponseInfo]:
+        """Send a search request and return the responses received within the response_wait_time."""
+        responses: List[SddpResponseInfo] = []
         try:
-            datagram = SddpDatagram(raw_data=data)
-            logger.debug(f"Received datagram from {addr}: {datagram}")
-            subscribers = list(self.datagram_subscribers)
-            for subscriber in subscribers:
-                try:
-                    subscriber.on_datagram(addr, datagram)
-                except BaseException as e:
-                    logger.warning(f"Subscriber raised exception processing datagram {datagram}: {e}")
-        except BaseException as e:
-            logger.warning(f"Error parsing datagram from {addr}, raw=[{data}]: {e}")
-        # self.transport.sendto(data, addr)
+            await asyncio.wait_for(asyncio.create_task(self._run_collector_task(responses, search_pattern, include_error_responses)), self.response_wait_time)
+        except asyncio.TimeoutError:
+            pass
+        return responses
 
-    def error_received(self, exc: Exception) -> None:
-        """Called when a send or receive operation raises an OSError.
+    _collector_response_statement_re = re.compile(r'^SDDP/(?P<version_major>[0-9]*)\.(?P<version_minor>[0-9]+) +(?P<status_code>[0-9]+) +(?P<status>.*[^ ]) *$')
+    async def _run_collector_task(self, responses: List[SddpResponseInfo], search_pattern: str, include_error_responses: bool) -> None:
+        logger.debug("response collector task starting")
 
-        (Other than BlockingIOError or InterruptedError.)
-        """
-        logger.info(f"Error received from transport: {exc}")
-        subscribers = list(self.datagram_subscribers)
-        for subscriber in subscribers:
-            try:
-                subscriber.on_end_of_stream(exc)
-            except BaseException as e:
-                logger.warning(f"Subscriber raised exception processing transport error: {e}")
-        self.set_final_exception(exc)
-
-
-    def connection_lost(self, exc: Optional[Exception]) -> None:
-        """Called when the connection is lost or closed."""
-        logger.info(f"Connection to transport lost, exc={exc}")
-        self.transport = None
-        subscribers = list(self.datagram_subscribers)
-        for subscriber in subscribers:
-            try:
-                subscriber.on_end_of_stream(exc)
-            except BaseException as e:
-                logger.warning(f"Subscriber raised exception processing transport connection loss: {e}")
-        if exc is None:
-            self.set_final_result()
-        else:
-            self.set_final_exception(exc)
-
-    def set_final_exception(self, exc: BaseException) -> None:
-        assert not exc is None
-        if not self.final_result.done():
-            self.final_result.set_exception(exc)
-        if not self.transport is None:
-            try:
-                self.transport.close()
-            except BaseException as e:
-                logger.error(f"Error closing transport: {e}")
-            self.transport = None
-
-    def set_final_result(self) -> None:
-        if not self.final_result.done():
-            self.final_result.set_result(None)
-        if not self.transport is None:
-            try:
-                self.transport.close()
-            except BaseException as e:
-                logger.error(f"Error closing transport: {e}")
-            self.transport = None
-
-
-    async def _device_collector_task(self) -> None:
-        logger.debug("Device collector task starting")
         try:
             async with SddpDatagramSubscriber(self) as subscriber:
-                async for addr, datagram in subscriber.iter_datagrams():
-                    logger.debug(f"Collector received datagram from {addr}: {datagram}")
-        except BaseException as e:
-            logger.warning(f"Device collector task exiting with exception: {e}")
+                for socket_binding in self.socket_bindings:
+                    search_datagram = SddpDatagram(f"SEARCH {search_pattern} SDDP/1.0")
+                    search_datagram['Host'] = f"{socket_binding.unicast_addr[0]}:{socket_binding.unicast_addr[1]}"
+                    socket_binding.sendto(search_datagram, (self.multicast_address, self.multicast_port))
+                async for socket_binding, addr, datagram in subscriber.iter_datagrams():
+                    m = self._collector_response_statement_re.match(datagram.statement_line)
+                    if m:
+                        version_major: Optional[int] = None
+                        version_minor: Optional[int] = None
+                        try:
+                            version_major = int(m.group('version_major'))
+                        except ValueError:
+                            pass
+                        try:
+                            version_minor = int(m.group('version_minor'))
+                        except ValueError:
+                            pass
+                        if not version_major is None and not version_minor is None and version_major >= 1:
+                            status_code_str = m.group('status_code')
+                            status_code: Optional[int] = None
+                            try:
+                                status_code = int(status_code_str)
+                            except ValueError:
+                                pass
+                            if not status_code is None:
+                                status = m.group('status')
+                                info = SddpResponseInfo(socket_binding, addr, datagram, f"{version_major}.{version_minor}", status_code, status)
+                                logger.debug(f"Response collector received response from {addr} on {socket_binding}: version={info.sddp_version}, status_code={status_code}, status={status}, headers={datagram.headers}")
+                                if include_error_responses or status_code == 200:
+                                    responses.append(info)
+        except asyncio.CancelledError:
+            logger.debug("Response collector task cancelled; exiting")
             raise
-        logger.debug("Device collector task exiting")
+        except BaseException as e:
+            logger.info(f"Response collector task exiting with exception: {e}")
+            raise
+        finally:
+            logger.debug("Response collector task exiting")
 
-if __name__ == "__main__":
-  import logging
-
-  async def amain() -> None:
-      server = SddpMulticastServer()
-      await server.start()
-      try:
-          await asyncio.wait_for(asyncio.shield(server.wait_for_done()), timeout=5.0)
-      except asyncio.TimeoutError:
-          logger.info("Time passed with no errors; shutting down")
-          await server.stop_and_wait()
-
-
-  logging.basicConfig(
-      level=logging.getLevelName('DEBUG'),
-      format="%(asctime)s %(levelname)s %(filename)s:%(lineno)d] %(message)s",
-      datefmt="%F %H:%M:%S")
-
-  loop = asyncio.new_event_loop()
-  asyncio.set_event_loop(loop)
-  loop.run_until_complete(amain())
+    async def __aenter__(self) -> SddpClient:
+        await super().__aenter__()
+        return self

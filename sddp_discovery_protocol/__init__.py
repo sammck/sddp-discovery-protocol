@@ -30,4 +30,16 @@ from .exceptions import SddpError
 from .sddp_datagram import SddpDatagram
 from .sddp_socket import SddpSocket, SddpSocketBinding, SddpDatagramSubscriber
 from .server import SddpServer, SddpAdvertisementInfo
+from .client import SddpClient, SddpResponseInfo, DEFAULT_RESPONSE_WAIT_TIME
 from .util import CaseInsensitiveDict
+
+__all__ = [
+    '__version__',
+    'Jsonable', 'JsonableDict',
+    'SddpError',
+    'SddpDatagram',
+    'SddpSocket', 'SddpSocketBinding', 'SddpDatagramSubscriber',
+    'SddpServer', 'SddpAdvertisementInfo',
+    'SddpClient', 'SddpResponseInfo',
+    'CaseInsensitiveDict'
+]
