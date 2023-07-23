@@ -1,5 +1,11 @@
+#
+# Copyright (c) 2023 Samuel J. McKelvie
+#
+# MIT License - See LICENSE file accompanying this package.
+#
+
 """
-Simple function to parse HTTP-style headers out of a bytes
+Simple utility functions used by this package
 """
 
 from __future__ import annotations

@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#
+# Copyright (c) 2023 Samuel J. McKelvie
+#
+# MIT License - See LICENSE file accompanying this package.
+#
 
 """
 Abstraction of a Datagram packet used in the SDDP protocol.
