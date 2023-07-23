@@ -53,8 +53,17 @@ class SddpDatagram(MutableMapping[str, HeaderValue]):
             statement: Optional[str]=None,
             headers: Optional[Mapping[str, NullableHeaderValue]]=None,
             body: Optional[bytes]=None,
-            raw_data: Optional[bytes]=None
+            raw_data: Optional[bytes]=None,
+            copy_from: Optional[SddpDatagram]=None
           ):
+        if copy_from is not None:
+            assert statement is None and headers is None and body is None and raw_data is None
+            self._raw_data = copy_from._raw_data
+            self._statement_line = copy_from._statement_line
+            self._raw_headers = copy_from._raw_headers.copy()
+            self._headers = copy_from._headers.copy()
+            self._body = copy_from._body
+            return
         self._raw_headers = CaseInsensitiveDict()
         self._headers = CaseInsensitiveDict()
         if raw_data is None:
@@ -462,7 +471,7 @@ class SddpDatagram(MutableMapping[str, HeaderValue]):
 
     # Copy is required
     def copy(self):
-        return SddpDatagram(raw_data=self._raw_data)
+        return SddpDatagram(copy_from=self)
 
     def _rebuild_headers(self) -> None:
         """Rebuild the decoded headers from the raw headers."""

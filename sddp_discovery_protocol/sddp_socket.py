@@ -59,12 +59,12 @@ class SddpSocketBinding:
        either when _SddpSocketProtocol.connection_made() is called, or
        when the transport is returned to SddpSocket by
        loop.create_datagram_endpoint()."""
-       
+
     unicast_addr: HostAndPort
     """The unicast ip address and port associated with this binding. If
        the binding is unicast then this will be the same as the socket
        local IP address."""
-       
+
     sockname: str
     """The name of the socket as it should be displayed in logs, etc"""
 
@@ -81,7 +81,7 @@ class SddpSocketBinding:
             else:
                 sockname = f"{bound_addr}@{unicast_addr}"
         self.sockname = sockname
-        
+
     async def attach_to_sddp_socket(self, sddp_socket: SddpSocket, index: int) -> None:
         if self.index >= 0:
             raise SddpError(f"Attempt to reattach SddpSocketBinding: {self}")
@@ -108,9 +108,9 @@ class SddpSocketBinding:
         if protocol != self._protocol:
             assert self._protocol is None
         self._protocol = protocol
-        
+
     def sendto(self, datagram: SddpDatagram, addr: HostAndPort) -> None:
-        logger.debug(f"Sending SddpDatagram to {addr}: {datagram}")
+        logger.debug(f"Sending SddpDatagram via {self} to {addr}: {datagram}")
         self.transport.sendto(datagram.raw_data, addr)
 
     def __str__(self) -> str:
@@ -185,7 +185,10 @@ class _SddpSocketProtocol(asyncio.DatagramProtocol, ABC):
         self.transport = None
 
 
-class SddpDatagramSubscriber:
+class SddpDatagramSubscriber(
+        AsyncContextManager['SddpDatagramSubscriber'],
+        AsyncIterable[Tuple[SddpSocketBinding, HostAndPort, SddpDatagram]]
+      ):
     sddp_socket: SddpSocket
     queue: asyncio.Queue[Optional[Tuple[SddpSocketBinding, HostAndPort, SddpDatagram]]]
     final_result: Future[None]
@@ -218,6 +221,9 @@ class SddpDatagramSubscriber:
                 break
             yield result
 
+    async def __aiter__(self) -> AsyncIterator[Tuple[SddpSocketBinding, HostAndPort, SddpDatagram]]:
+        return await self.iter_datagrams()
+
     def set_final_result(self) -> None:
         if not self.final_result.done():
             self.final_result.set_result(None)
@@ -237,7 +243,7 @@ class SddpDatagramSubscriber:
             if not self.queue is None:
                 # wake up any waiting tasks
                 try:
-                    self.queue.put(None)
+                    self.queue.put_nowait(None)
                 except asyncio.QueueFull:
                     # queue is full so waiters will wake up soon
                     pass
@@ -290,7 +296,7 @@ class SddpDatagramSubscriber:
                 # queue is full so waiters will wake up soon
                 pass
 
-class SddpSocket:
+class SddpSocket(AsyncContextManager[Self]):
     """
     An abstract async SDDP socket that can:
 
@@ -323,7 +329,7 @@ class SddpSocket:
 
     async def remove_subscriber(self, subscriber: SddpDatagramSubscriber) -> None:
         self.datagram_subscribers.remove(subscriber)
-        
+
     async def add_socket_binding(self, socket_binding: SddpSocketBinding) -> None:
         if socket_binding.index >= 0:
             raise SddpError(f"Attempt to reattach SddpSocketBinding: {socket_binding}")
@@ -370,6 +376,10 @@ class SddpSocket:
 
         except BaseException as e:
             self.set_final_exception(e)
+            try:
+                await self.wait_for_done()
+            except BaseException as e:
+                pass
             raise
 
     async def stop(self) -> None:
@@ -428,7 +438,7 @@ class SddpSocket:
 
     def connection_lost(self, socket_binding: SddpSocketBinding, exc: Optional[Exception]) -> None:
         """Called when the connection is lost or closed."""
-        logger.info(f"Connection to transport lost on {socket_binding}, exc={exc}")
+        logger.debug(f"Connection to transport lost on {socket_binding}, exc={exc}")
         self.transport = None
         # TODO: End all socket bindings if any socket fails
         subscribers = list(self.datagram_subscribers)
@@ -463,12 +473,30 @@ class SddpSocket:
     def set_final_exception(self, exc: BaseException) -> None:
         assert not exc is None
         if not self.final_result.done():
+            logger.debug(f"SddpSocket: Setting final exception: {exc}")
             self.final_result.set_exception(exc)
             self._close_all_transports()
             self._close_all_socks()
 
     def set_final_result(self) -> None:
         if not self.final_result.done():
+            logger.debug(f"SddpSocket: Setting final result to success")
             self.final_result.set_result(None)
             self._close_all_transports()
             self._close_all_socks()
+
+    async def __aenter__(self) -> Self:
+        await self.start()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        if exc is None:
+            self.set_final_result()
+        else:
+            self.set_final_exception(exc)
+        try:
+            # ensure that final_result has been awaited
+            await self.wait_for_done()
+        except Exception as e:
+            pass
+        return False

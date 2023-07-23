@@ -9,105 +9,225 @@ from __future__ import annotations
 
 import sys
 import argparse
+import json
+import base64
+import asyncio
+import logging
+from signal import SIGINT, SIGTERM
 
-from jvc_projector.proj import *
+from sddp_discovery_protocol.internal_types import *
 
-async def run_command(session: JvcProjectorSession, argv: List[str]) -> None:
-    if len(argv) < 1:
-        raise ValueError("Missing command")
-    if len(argv) > 1:
-        raise ValueError("Too many arguments")
-    cmdname = argv[0]
-    if cmdname == "on":
-        await session.power_on_and_wait()
-    elif cmdname == "off":
-        await session.power_off_and_wait()
-    elif cmdname == "power_status":
-        power_status = await session.cmd_power_status()
-        print(f"Power status={power_status}")
-    elif cmdname == "model_id":
-        model_id = await session.cmd_model_id()
-        print(f"Model ID={model_id}")
-    elif cmdname == "model_name":
-        model_name = await session.cmd_model_name()
-        print(f"Model name={model_name}")
-    elif cmdname == "null":
-        await session.cmd_null()
-    else:
-        raise ValueError(f"Unknown command: {cmdname}")
+from sddp_discovery_protocol import (
+    __version__ as pkg_version,
+    SddpSocket,
+    SddpServer,
+    SddpDatagramSubscriber,
+    SddpDatagram,
+    SddpSocketBinding,
+    CaseInsensitiveDict,
+    SddpAdvertisementInfo,
+  )
+class CmdExitError(RuntimeError):
+    exit_code: int
 
-async def amain(argv: Optional[Sequence[str]]=None) -> int:
-    parser = argparse.ArgumentParser()
+    def __init__(self, exit_code: int, msg: Optional[str]=None):
+        if msg is None:
+            msg = f"Command exited with return code {exit_code}"
+        super().__init__(msg)
+        self.exit_code = exit_code
 
-    parser.add_argument("--port", default=20554, type=int,
-        help="JVC projector port number to connect to. Default: 20554")
-    parser.add_argument("-t", "--timeout", default=2.0, type=float,
-        help="Timeout for network operations (seconds). Default: 2.0")
-    parser.add_argument("-l", "--loglevel", default="ERROR",
-        help="Logging level. Default: ERROR.",
-        choices=["ERROR", "WARNING", "INFO", "DEBUG"])
-    parser.add_argument("-p", "--password", default=None,
-        help="Password to use when connecting to newer JVC hosts (e.g., DLA-NZ8). Default: use ENV var JVC_PROJECTOR_PASSWORD, or no password.")
-    parser.add_argument("-H", "--host", help="JVC projector hostname or IP address. Default: Use env var JVC_PROJECTOR_HOST")
-    parser.add_argument('command', nargs='*', default=[])
+class ArgparseExitError(CmdExitError):
+    pass
 
-    args = parser.parse_args(args=argv)
+class NoExitArgumentParser(argparse.ArgumentParser):
+    def exit(self, status=0, message=None):
+        if message:
+            self._print_message(message, sys.stderr)
+        raise ArgparseExitError(status, message)
 
-    logging.basicConfig(
-        level=logging.getLevelName(args.loglevel),
-        format="%(asctime)s %(levelname)s %(filename)s:%(lineno)d] %(message)s",
-        datefmt="%F %H:%M:%S")
+integer_sddp_headers: List[str] = [ "Max-Age" ]
 
-    password: Optional[str] = args.password
-    if password is None:
-        password = os.getenv("JVC_PROJECTOR_PASSWORD")
-    if not password is None and password == '':
-        password = None
+class CommandHandler:
+    _argv: Optional[Sequence[str]]
+    _parser: argparse.ArgumentParser
+    _args: argparse.Namespace
 
-    host: Optional[str] = args.host
-    if host is None:
-        host = os.getenv("JVC_PROJECTOR_HOST")
-        if host is None:
-            raise Exception("No projector host specified. Use --host or set env var JVC_PROJECTOR_HOST")
+    def __init__(self, argv: Optional[Sequence[str]]=None):
+        self._argv = argv
 
-    port: int = args.port
-    timeout_secs: float = args.timeout
-    cmd_args: List[str] = args.command
+    async def cmd_bare(self) -> int:
+        print("A command is required", file=sys.stderr)
+        return 1
+
+    async def cmd_server(self) -> int:
+        async def notify_handler(info: SddpAdvertisementInfo) -> None:
+            datagram = info.datagram
+            header_dict: Dict[str, str] = dict(datagram.headers)
+            summary: JsonableDict = {
+                "sddp_version": info.sddp_version,
+                "src_addr": f"{info.src_addr[0]}:{info.src_addr[1]}",
+                "local_addr": f"{info.socket_binding.unicast_addr[0]}:{info.socket_binding.unicast_addr[1]}",
+                "headers": header_dict,
+                "monotonic_time": info.monotonic_time,
+                "utc_time": info.utc_time.isoformat(),
+            }
+            if datagram.body is not None and len(datagram.body) > 0:
+                summary["body"] = base64.b64encode(datagram.body).decode('ascii')
+            print(json.dumps(summary, indent=2, sort_keys=True))
+
+        advertise_interval: float = self._args.advertise_interval
+        headers = CaseInsensitiveDict()
+        arg_headers: List[str] = self._args.headers
+        for header_assignment in arg_headers:
+            name, value = header_assignment.split('=', 1)
+            if name.lower() in [x.lower() for x in integer_sddp_headers]:
+                value = int(value)
+            headers[name] = value
+        bind_addresses: Optional[List[str]] = self._args.bind_addresses
+        if not bind_addresses is None and len(bind_addresses) == 0:
+            bind_addresses = None
+        server = SddpServer(advertise_interval=advertise_interval, device_headers=headers, bind_addresses=bind_addresses)
+        server.add_notify_handler(notify_handler)
+        async def sigint_cleanup() -> None:
+            try:
+                await asyncio.shield(server.final_result)
+                logging.debug("sigint_cleanup: Server exited without SIGINT/SIGTERM; exiting")
+            except asyncio.CancelledError:
+                logging.debug("sigint_cleanup: Detected SIGINT/SIGTERM, cancelling server")
+                if server.final_result.done():
+                    logging.debug("sigint_cleanup: Server already had final_result set--no effect")
+                server.set_final_exception(CmdExitError(1, "Server terminated with SIGINT or SIGTERM"))
+        loop = asyncio.get_running_loop()
+        sig_task = asyncio.create_task(sigint_cleanup())
+        for signal in (SIGINT, SIGTERM):
+            loop.add_signal_handler(signal, sig_task.cancel)
+        try:
+            async with server as s:
+                await s.wait_for_done()
+        finally:
+            for signal in (SIGINT, SIGTERM):
+                loop.remove_signal_handler(signal)
+            sig_task.cancel()
+            try:
+                await sig_task
+            except asyncio.CancelledError:
+                pass
+        return 0
+
+    async def cmd_version(self) -> int:
+        print(pkg_version)
+        return 0
+
+    async def arun(self) -> int:
+        """Run the sddp command-line tool with provided arguments
+
+        Args:
+            argv (Optional[Sequence[str]], optional):
+                A list of commandline arguments (NOT including the program as argv[0]!),
+                or None to use sys.argv[1:]. Defaults to None.
+
+        Returns:
+            int: The exit code that would be returned if this were run as a standalone command.
+        """
+        import argparse
+
+        parser = argparse.ArgumentParser(description="Access a secret key/value database.")
 
 
-    projector = JvcProjector(
-        host,
-        port=port,
-        password=password,
-        timeout_secs=timeout_secs)
+        # ======================= Main command
+
+        self._parser = parser
+        parser.add_argument('--traceback', "--tb", action='store_true', default=False,
+                            help='Display detailed exception information')
+        parser.add_argument('--log-level', dest='log_level', default='info',
+                            choices=['debug', 'info', 'warning', 'error', 'critical'],
+                            help='''The logging level to use. Default: warning''')
+        parser.set_defaults(func=self.cmd_bare)
+
+        subparsers = parser.add_subparsers(
+                            title='Commands',
+                            description='Valid commands',
+                            help='Additional help available with "<command-name> -h"')
 
 
-    async with await projector.connect() as session:
-        await session.command(null_command)
-        power_status = await session.cmd_power_status()
-        print(f"Power status: {power_status}")
-        model_name = await session.cmd_model_name()
-        print(f"Model name: {model_name}")
-        if len(cmd_args) > 0:
-            await run_command(session, cmd_args)
-            power_status = await session.cmd_power_status()
-            print(f"Power status: {power_status}")
+        # ======================= server
 
-    return 0
+        parser_server = subparsers.add_parser('server', description="Run an SDDP server")
+        parser_server.add_argument('--advertise-interval', dest='advertise_interval', default=1200, type=int,
+                            help='''The interval at which to send device advertisements, in seconds. Default: 2/3 of Max-Age header, or 1200 seconds (20 minutes)''')
+        parser_server.add_argument('-H', '--header', dest="headers", action='append', default=[],
+                            help='''A <name>=<value> header to include in the device advertisement. May be repeated.''')
+        parser_server.add_argument('-b', '--bind', dest="bind_addresses", action='append', default=[],
+                            help='''The local unicast IP address to bind to. May be repeated. Default: all local non-loopback unicast addresses.''')
+        parser_server.set_defaults(func=self.cmd_server)
 
-def main(argv: Optional[Sequence[str]]=None) -> int:
-    loop = asyncio.new_event_loop()
-    try:
-      asyncio.set_event_loop(loop)
-      rc = loop.run_until_complete(amain())
-    finally:
-      loop.close()
-    return rc
+        # ======================= version
+
+        parser_version = subparsers.add_parser('version',
+                                description='''Display version information.''')
+        parser_version.set_defaults(func=self.cmd_version)
+
+        # =========================================================
+
+        try:
+            args = parser.parse_args(self._argv)
+        except ArgparseExitError as ex:
+            return ex.exit_code
+        traceback: bool = args.traceback
+
+        try:
+            logging.basicConfig(
+                level=logging.getLevelName(args.log_level.upper()),
+            )
+            self._args = args
+            func: Callable[[], Awaitable[int]] = args.func
+            logging.debug(f"Running command {func.__name__}, tb = {traceback}")
+            rc = await func()
+            logging.debug(f"Command {func.__name__} returned {rc}")
+        except KeyboardInterrupt as ex:
+            if traceback:
+                raise
+            print("sddp: Interrupted by user", file=sys.stderr)
+            rc = 1
+        except Exception as ex:
+            if isinstance(ex, CmdExitError):
+                rc = ex.exit_code
+            else:
+                rc = 1
+            if rc != 0:
+                if traceback:
+                    raise
+            print(f"sddp: error: {ex}", file=sys.stderr)
+        except BaseException as ex:
+            print(f"sddp: Unhandled exception: {ex}", file=sys.stderr)
+            raise
+
+        return rc
+
+    def run(self) -> int:
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            rc = loop.run_until_complete(self.arun())
+        finally:
+            loop.close()
+        return rc
 
 def run(argv: Optional[Sequence[str]]=None) -> int:
-  rc = main(argv)
-  return rc
+    try:
+        rc = CommandHandler(argv).run()
+    except CmdExitError as ex:
+        rc = ex.exit_code
+    return rc
+
+async def arun(argv: Optional[Sequence[str]]=None) -> int:
+    try:
+        rc = await CommandHandler(argv).arun()
+    except CmdExitError as ex:
+        rc = ex.exit_code
+    return rc
 
 # allow running with "python3 -m", or as a standalone script
 if __name__ == "__main__":
-  sys.exit(run())
+    sys.exit(run())
+

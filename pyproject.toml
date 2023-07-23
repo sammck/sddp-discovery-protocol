@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "ssdp-discovery-protocol"
+name = "sddp-discovery-protocol"
 version = "0.1.0"
 description = "Implementation of Control4's Simple Device Discovery Protocol (SDDP)"
 authors = [ "Sam McKelvie <dev@mckelvie.org>" ]

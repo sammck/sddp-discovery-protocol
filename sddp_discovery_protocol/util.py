@@ -101,7 +101,10 @@ def encode_http_header(name: str, value: str) -> bytes:
     h = EmailParserHeader(value, header_name=name)
     return name.encode() + b': ' + h.encode(linesep='\r\n').encode() + b'\r\n'
 
-def get_local_ip_addresses_and_interfaces(address_family: socket.AddressFamily | int=socket.AF_INET) -> List[Tuple[str, str]]:
+def get_local_ip_addresses_and_interfaces(
+        address_family: Union[socket.AddressFamily, int]=socket.AF_INET,
+        include_loopback: bool=True
+    ) -> List[Tuple[str, str]]:
     """Returns a list of Tuple[ip_address: str, interface_name: str] for the IP addresses of the local host
        in a requested address family. The result is sorted in a way that attempts to place the "preferred"
        canonical IP address first in the list, according to the following scheme:
@@ -124,8 +127,12 @@ def get_local_ip_addresses_and_interfaces(address_family: socket.AddressFamily |
               if ifname == default_gateway_ifname:
                   priority = 0
               elif is_ipv6 and IPv6Address(ip_str).is_loopback:
+                  if not include_loopback:
+                      continue
                   priority = 3
               elif not is_ipv6 and IPv4Address(ip_str).is_loopback:
+                  if not include_loopback:
+                      continue
                   priority = 3
               elif not is_ipv6 and ip_str.startswith('172.'):
                   priority = 2
@@ -135,7 +142,7 @@ def get_local_ip_addresses_and_interfaces(address_family: socket.AddressFamily |
               result_with_priority.append((priority, ip_str, ifname))
     return [ (ip, ifname) for _, ip, ifname in sorted(result_with_priority)]
 
-def get_local_ip_addresses(address_family: socket.AddressFamily | int=socket.AF_INET) -> List[str]:
+def get_local_ip_addresses(address_family: Union[socket.AddressFamily, int]=socket.AF_INET, include_loopback: bool=True) -> List[str]:
     """Returns a List[ip_address: str] for the IP addresses of the local host
        in a requested address family. The result is sorted in a way that attempts to place the "preferred"
        canonical IP address first in the list, according to the following scheme:
@@ -143,7 +150,7 @@ def get_local_ip_addresses(address_family: socket.AddressFamily | int=socket.AF_
            2. Non-loopback addresses precede loopback addresses.
            3. IPV4 addresses that begin with 172. follow other IPV4 addresses. This is a hack to
               deprioritize local docker network addresses."""
-    return [ ip for ip, _ in get_local_ip_addresses_and_interfaces(address_family)]
+    return [ ip for ip, _ in get_local_ip_addresses_and_interfaces(address_family, include_loopback=include_loopback)]
 
 def get_default_ip_gateway(address_family: socket.AddressFamily | int=socket.AF_INET) -> Tuple[Optional[str], Optional[str]]:
     """Returns the (gateway_ip_address: str, gateway_interface_name: str) for the default IP gateway in the
