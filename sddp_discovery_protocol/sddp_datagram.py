@@ -20,7 +20,10 @@ from .util import (
 
 import json
 
-class SddpDatagram(MutableMapping[str, str | int | float]):
+HeaderValue = Union[str, int, float]
+NullableHeaderValue = Optional[HeaderValue]
+
+class SddpDatagram(MutableMapping[str, HeaderValue]):
     """Wrapper for a raw SDDP datagram.
 
     This class provides parsing and formatting of the HTTP-like packets, a dict-like
@@ -41,14 +44,14 @@ class SddpDatagram(MutableMapping[str, str | int | float]):
     _body: bytes
     """The body of the datagram, if any. If there is no body, b'' is returned."""
 
-    _headers: CaseInsensitiveDict[str | int | float]
-    """The decoded headers as a CaseInsensitiveDict[str | int | float]. Quoted strings are unquoted
+    _headers: CaseInsensitiveDict[HeaderValue]
+    """The decoded headers as a CaseInsensitiveDict[HeaderValue]. Quoted strings are unquoted
        using JSON syntax. headers that are not valid JSON are omitted"""
 
     def __init__(
             self,
             statement: Optional[str]=None,
-            headers: Optional[Mapping[str, str | int | float | None]]=None,
+            headers: Optional[Mapping[str, NullableHeaderValue]]=None,
             body: Optional[bytes]=None,
             raw_data: Optional[bytes]=None
           ):
@@ -130,9 +133,9 @@ class SddpDatagram(MutableMapping[str, str | int | float]):
 
     def update_raw_headers(
             self,
-            other: Mapping[str, str | None] | Iterable[Tuple[str, str | None]]=(),
+            other: Union[Mapping[str, Optional[str]], Iterable[Tuple[str, Optional[str]]]]=(),
             /,
-            **kwargs: str | None
+            **kwargs: Optional[str]
           ) -> None:
         self._update_raw_headers_no_rebuild(other, **kwargs)
         self._rebuild_raw_data()
@@ -158,18 +161,18 @@ class SddpDatagram(MutableMapping[str, str | int | float]):
         self._rebuild_raw_data()
 
     @property
-    def headers(self) -> CaseInsensitiveDict[str | int | float]:
-        """The decoded headers as a CaseInsensitiveDict[str | int | float]. Quoted strings are unquoted
+    def headers(self) -> CaseInsensitiveDict[HeaderValue]:
+        """The decoded headers as a CaseInsensitiveDict[HeaderValue]. Quoted strings are unquoted
            using JSON syntax. headers that are not valid JSON are omitted"""
         return self._headers
 
     @headers.setter
-    def headers(self, value: Optional[Mapping[str, str | int | float]]) -> None:
+    def headers(self, value: Optional[Mapping[str, NullableHeaderValue]]) -> None:
         self._clear_decoded_headers_no_rebuild()
         if value is not None:
             self.update(value)
 
-    def set_raw_header(self, name: str, value: str | None) -> None:
+    def set_raw_header(self, name: str, value: Optional[str]) -> None:
         """Set a raw undecoded header value, and updates the decoded header as well.
            If value is None, the header is removed.
 
@@ -181,7 +184,7 @@ class SddpDatagram(MutableMapping[str, str | int | float]):
         self._set_raw_header_no_rebuild(name, value)
         self._rebuild_raw_data()
 
-    def set_header(self, name: str, value: str | int | float | None) -> None:
+    def set_header(self, name: str, value: NullableHeaderValue) -> None:
         """Set a decoded header value, and updates the raw header as well.
            If value is None, the header is removed.
 
@@ -400,10 +403,10 @@ class SddpDatagram(MutableMapping[str, str | int | float]):
         assert value is None or isinstance(value, str)
         self.set_header("Driver", value)
 
-    def __setitem__(self, key: str, value: str | int | float | None) -> None:
+    def __setitem__(self, key: str, value: NullableHeaderValue) -> None:
         self.set_header(key, value)
 
-    def __getitem__(self, key: str) -> str | int | float:
+    def __getitem__(self, key: str) -> HeaderValue:
         return self.headers[key]
 
     def __delitem__(self, key: str) -> None:
@@ -414,9 +417,9 @@ class SddpDatagram(MutableMapping[str, str | int | float]):
 
     def _update_no_rebuild(
             self,
-            other: Mapping[str, str| int | float | None] | Iterable[Tuple[str, str | int | float | None]]=(),
+            other: Union[Mapping[str, NullableHeaderValue], Iterable[Tuple[str, NullableHeaderValue]]]=(),
             /,
-            **kwargs: str | int | float | None
+            **kwargs: NullableHeaderValue
           ) -> None:
         if isinstance(other, Mapping):
             for key in other:
@@ -432,9 +435,9 @@ class SddpDatagram(MutableMapping[str, str | int | float]):
 
     def update(   # type: ignore[override]
             self,
-            other: Mapping[str, str| int | float | None] | Iterable[Tuple[str, str | int | float | None]]=(),
+            other: Union[Mapping[str, NullableHeaderValue], Iterable[Tuple[str, NullableHeaderValue]]]=(),
             /,
-            **kwargs: str | int | float | None
+            **kwargs: NullableHeaderValue
           ) -> None:
         self._update_no_rebuild(other, **kwargs)
         self._rebuild_raw_data()
@@ -469,9 +472,9 @@ class SddpDatagram(MutableMapping[str, str | int | float]):
 
     def _update_raw_headers_no_rebuild(
             self,
-            other: Mapping[str, str | None] | Iterable[Tuple[str, str | None]]=(),
+            other: Union[Mapping[str, Optional[str]], Iterable[Tuple[str, Optional[str]]]]=(),
             /,
-            **kwargs: str | None
+            **kwargs: Optional[str]
           ) -> None:
         if isinstance(other, Mapping):
             for key in other:
@@ -504,7 +507,7 @@ class SddpDatagram(MutableMapping[str, str | int | float]):
           raw_data += self.body
         self._raw_data = raw_data
 
-    def _set_raw_header_no_rebuild(self, name: str, value: str | None) -> None:
+    def _set_raw_header_no_rebuild(self, name: str, value: Optional[str]) -> None:
         if value is None:
             self._del_header_no_rebuild(name)
         else:
@@ -519,7 +522,7 @@ class SddpDatagram(MutableMapping[str, str | int | float]):
         except json.JSONDecodeError:
             self._headers.pop(name, None)
 
-    def _set_header_no_rebuild(self, name: str, value: str | int | float | None) -> None:
+    def _set_header_no_rebuild(self, name: str, value: NullableHeaderValue) -> None:
         if value is None:
             self._del_header_no_rebuild(name)
         else:

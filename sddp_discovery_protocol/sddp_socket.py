@@ -24,10 +24,8 @@ from abc import ABC, abstractmethod
 
 from sddp_discovery_protocol.internal_types import *
 from .pkg_logging import logger
-from .constants import SDDP_MULTICAST_ADDRESS, SDDP_PORT
-
+from .exceptions import SddpError
 from .sddp_datagram import SddpDatagram
-from .util import get_local_ip_addresses
 
 MAX_QUEUE_SIZE = 1000
 
@@ -42,11 +40,11 @@ class SddpSocketBinding:
     loop.create_datagram_endpoint.
     """
 
-    sddp_socket: SddpSocket
-    """The SddpSocket that is bound to this low-level socket."""
+    sddp_socket: Optional[SddpSocket] = None
+    """The SddpSocket that is bound to this low-level socket. """
 
-    index: int
-    """The index of this socket binding within SddpSocket."""
+    index: int = -1
+    """The index of this socket binding within SddpSocket. Set to -1 until this socket binding is added."""
 
     sock: Optional[socket.socket] = None
     """The low-level socket that is bound to this SddpSocket."""
@@ -61,14 +59,35 @@ class SddpSocketBinding:
        either when _SddpSocketProtocol.connection_made() is called, or
        when the transport is returned to SddpSocket by
        loop.create_datagram_endpoint()."""
-
+       
+    unicast_addr: HostAndPort
+    """The unicast ip address and port associated with this binding. If
+       the binding is unicast then this will be the same as the socket
+       local IP address."""
+       
     sockname: str
+    """The name of the socket as it should be displayed in logs, etc"""
 
-    def __init__(self, sddp_socket: SddpSocket, index: int, sock: socket.socket):
+    def __init__(self, sock: socket.socket, unicast_addr: Optional[HostAndPort]=None, sockname: Optional[str]=None):
+        self.sock = sock
+        if unicast_addr is None:
+            unicast_addr = sock.getsockname()
+            assert isinstance(unicast_addr, tuple)
+        self.unicast_addr = unicast_addr
+        if sockname is None:
+            bound_addr = sock.getsockname()
+            if bound_addr == unicast_addr:
+                sockname = str(bound_addr)
+            else:
+                sockname = f"{bound_addr}@{unicast_addr}"
+        self.sockname = sockname
+        
+    async def attach_to_sddp_socket(self, sddp_socket: SddpSocket, index: int) -> None:
+        if self.index >= 0:
+            raise SddpError(f"Attempt to reattach SddpSocketBinding: {self}")
+        assert self.sddp_socket is None or self.sddp_socket == sddp_socket
         self.sddp_socket = sddp_socket
         self.index = index
-        self.sock = sock
-        self.sockname = sock.getsockname()
 
     @property
     def transport(self) -> Optional[asyncio.DatagramTransport]:
@@ -89,6 +108,10 @@ class SddpSocketBinding:
         if protocol != self._protocol:
             assert self._protocol is None
         self._protocol = protocol
+        
+    def sendto(self, datagram: SddpDatagram, addr: HostAndPort) -> None:
+        logger.debug(f"Sending SddpDatagram to {addr}: {datagram}")
+        self.transport.sendto(datagram.raw_data, addr)
 
     def __str__(self) -> str:
         return f"SddpSocketBinding({self.index}: {self.sockname})"
@@ -160,7 +183,6 @@ class _SddpSocketProtocol(asyncio.DatagramProtocol, ABC):
             self.sddp_socket.set_final_exception(e)
             raise
         self.transport = None
-
 
 
 class SddpDatagramSubscriber:
@@ -301,11 +323,20 @@ class SddpSocket:
 
     async def remove_subscriber(self, subscriber: SddpDatagramSubscriber) -> None:
         self.datagram_subscribers.remove(subscriber)
+        
+    async def add_socket_binding(self, socket_binding: SddpSocketBinding) -> None:
+        if socket_binding.index >= 0:
+            raise SddpError(f"Attempt to reattach SddpSocketBinding: {socket_binding}")
+        i = len(self.socket_bindings)
+        self.socket_bindings.append(socket_binding)
+        await socket_binding.attach_to_sddp_socket(self, i)
+        logger.debug(f"Added socket binding {i}: {socket_binding}")
 
     @abstractmethod
-    async def create_sockets(self) -> List[socket.socket]:
+    async def add_socket_bindings(self) -> None:
         """Abstract method that creates and binds the sockets that will be used to receive
-           and send datagrams (typically one per interface).  Must be overridden by subclasses."""
+           and send datagrams (typically one per interface), and adds them with self.add_socket_binding().
+           Must be overridden by subclasses."""
         raise NotImplementedError()
 
     async def finish_start(self) -> None:
@@ -316,11 +347,9 @@ class SddpSocket:
     async def start(self) -> None:
         try:
             loop = asyncio.get_running_loop()
-            socks = await self.create_sockets()
-            assert len(socks) > 0
-            for i, sock in enumerate(socks):
-                socket_binding = SddpSocketBinding(self, i, sock)
-                self.socket_bindings.append(socket_binding)
+            await self.add_socket_bindings()
+            if len(self.socket_bindings) == 0:
+                raise SddpError("No datagram sockets were added to SddpSocket")
 
             for socket_binding in self.socket_bindings:
                 untyped_transport, protocol = await loop.create_datagram_endpoint(

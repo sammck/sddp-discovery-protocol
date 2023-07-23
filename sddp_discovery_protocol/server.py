@@ -16,16 +16,16 @@ from __future__ import annotations
 import asyncio
 from asyncio import Future
 import socket
-import struct
 import sys
+import re
 
 from sddp_discovery_protocol.internal_types import *
 from .pkg_logging import logger
 from .constants import SDDP_MULTICAST_ADDRESS, SDDP_PORT
 
 from .sddp_datagram import SddpDatagram
-from .sddp_socket import SddpSocket, SddpDatagramSubscriber
-from .util import CaseInsensitiveDict, get_local_ip_addresses
+from .sddp_socket import SddpSocket, SddpSocketBinding, SddpDatagramSubscriber
+from .util import get_local_ip_addresses
 
 DEFAULT_MAX_AGE = 1800
 
@@ -100,12 +100,10 @@ class SddpServer(SddpSocket):
         self.bind_addresses = list(bind_addresses)
 
     #@override
-    async def create_sockets(self) -> List[socket.socket]:
+    async def add_socket_bindings(self) -> None:
         """Abstract method that creates and binds the sockets that will be used to receive
-           and send datagrams (typically one per interface).  Must be overridden by subclasses."""
-
-        result: List[socket.socket] = []
-        loop = asyncio.get_running_loop()
+           and send datagrams (typically one per interface), and adds them with self.add_socket_binding().
+           Must be overridden by subclasses."""
 
         # Create a socket for each bind address
         addrinfo = socket.getaddrinfo(self.multicast_address, self.multicast_port)[0]
@@ -136,14 +134,14 @@ class SddpServer(SddpSocket):
                 mreq = group_bin + bind_bin_addr
                 logger.debug(f"Joining multicast group {self.multicast_address} on {bind_address}; mreq={mreq}")
                 sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-            result.append(sock)
-        return result
+            socket_binding = SddpSocketBinding(sock, unicast_addr=(bind_address, self.multicast_port))
+            await self.add_socket_binding(socket_binding)
 
     async def finish_start(self) -> None:
         """Called after the socket is up and running.  Subclasses can override to do additional
            initialization."""
         self.collector_task = asyncio.create_task(self._run_collector_task())
-        #self.responder_task = asyncio.create_task(self._run_responder_task())
+        self.responder_task = asyncio.create_task(self._run_responder_task())
 
     async def wait_for_dependents_done(self) -> None:
         """Called after final_result has been awaited.  Subclasses can override to do additional
@@ -189,17 +187,63 @@ class SddpServer(SddpSocket):
             raise
         logger.debug("Device collector task exiting")
 
+    _responder_req_statement_re = re.compile(r'^SEARCH +(?P<pattern>[^ ]+) (?P<protocol>HTTP|SDDP)/(?P<version_major>[0-9]*)\.(?P<version_minor>[0-9]+) *$')
+    async def _run_responder_task(self) -> None:
+        logger.debug("Sddp responder task starting")
+        try:
+            async with SddpDatagramSubscriber(self) as subscriber:
+                async for socket_binding, addr, datagram in subscriber.iter_datagrams():
+                    m = self._responder_req_statement_re.match(datagram.statement_line)
+                    if m:
+                        statement_protocol = m.group('protocol')
+                        if statement_protocol in ('HTTP', "SDDP"):
+                            version_major: Optional[int] = None
+                            version_minor: Optional[int] = None
+                            try:
+                                version_major = int(m.group('version_major'))
+                            except ValueError:
+                                pass
+                            try:
+                                version_minor = int(m.group('version_minor'))
+                            except ValueError:
+                                pass
+                            if not version_major is None and not version_minor is None and version_major >= 1:
+                                pattern = m.group('pattern')
+                                # NOTE: in the future when SDDP protocol is documented, we can filter based on pattern
+                                #       but for now we will always respond.
+                                logger.debug(f"Sddp responder received SEARCH request from {addr} on {socket_binding}: pattern='{pattern}', protocol={statement_protocol}, version={version_major}.{version_minor}")
+                                response = self.advertise_datagram.copy()
+                                response.statement_line = f"{statement_protocol}/{version_major}.{version_minor} 200 OK"
+                                if not 'From' in response:
+                                    # Fill in the From header with the unicast address that applies to the interface on which the request was received
+                                    unicast_ip, unicast_port = socket_binding.unicast_addr
+                                    response['From'] = f"{unicast_ip}:{unicast_port}"
+                                socket_binding.sendto(response, addr)
+        except BaseException as e:
+            logger.warning(f"Sddp responder task exiting with exception: {e}")
+            raise
+        logger.debug("Sddp responder task exiting")
+
 if __name__ == "__main__":
   import logging
 
   async def amain() -> None:
-      server = SddpServer()
-      await server.start()
-      try:
-          await asyncio.wait_for(asyncio.shield(server.wait_for_done()), timeout=60.0)
-      except asyncio.TimeoutError:
-          logger.info("Time passed with no errors; shutting down")
-          await server.stop_and_wait()
+        device_headers = {
+            "Host": socket.gethostname(),
+            "Type": "acme:TestServer",
+            "Primary-Proxy": "test_server",
+            "Proxies": "test_server",
+            "Manufacturer": "Acme",
+            "Model": "TestServer",
+            "Driver": "test_server.c4z"          
+        }
+        server = SddpServer(device_headers=device_headers)
+        await server.start()
+        try:
+            await asyncio.wait_for(asyncio.shield(server.wait_for_done()), timeout=2000.0)
+        except asyncio.TimeoutError:
+            logger.info("Time passed with no errors; shutting down")
+            await server.stop_and_wait()
 
 
   logging.basicConfig(
