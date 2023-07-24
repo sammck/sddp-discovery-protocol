@@ -32,8 +32,11 @@ from typing import (
     Mapping,
     MutableMapping,
     Sequence,
-    AsyncIterator
+    AsyncIterator,
   )
+
+from types import TracebackType
+
 
 from typing_extensions import Self
 

@@ -21,14 +21,18 @@ import sys
 import re
 import time
 import datetime
+from contextlib import asynccontextmanager
 
-from sddp_discovery_protocol.internal_types import *
+from .internal_types import *
 from .pkg_logging import logger
 from .constants import SDDP_MULTICAST_ADDRESS, SDDP_PORT
 
 from .sddp_datagram import SddpDatagram
 from .sddp_socket import SddpSocket, SddpSocketBinding, SddpDatagramSubscriber
-from .util import get_local_ip_addresses
+from .util import get_local_ip_addresses, CaseInsensitiveDict
+
+DEFAULT_RESPONSE_WAIT_TIME = 4.0
+"""The default amount of time (in seconds) to wait for responses to come in."""
 
 class SddpResponseInfo:
     socket_binding: SddpSocketBinding
@@ -77,8 +81,135 @@ class SddpResponseInfo:
         self.monotonic_time = time.monotonic()
         self.utc_time = datetime.datetime.utcnow()
 
-DEFAULT_RESPONSE_WAIT_TIME = 3.0
-"""The default amount of time (in seconds) to wait for responses to come in."""
+class SddpSearchRequest(
+        AsyncContextManager['SddpSearchRequest'],
+        AsyncIterable[SddpResponseInfo]
+      ):
+    """An object that manages a single search request on an SddpClient and all of the received responses
+       within an AsyncContextManager/AsyncInterable interface."""
+
+    _response_statement_re = re.compile(r'^SDDP/(?P<version_major>[0-9]*)\.(?P<version_minor>[0-9]+) +(?P<status_code>[0-9]+) +(?P<status>.*[^ ]) *$')
+    
+    sddp_client: SddpClient
+    search_pattern: str
+    include_error_responses: bool
+    
+    dg_subscriber: SddpDatagramSubscriber
+    response_wait_time: float
+    max_responses: int
+    end_time: float = 0.0
+    filter_headers: Optional[CaseInsensitiveDict[str]] = None
+
+    def __init__(
+            self,
+            sddp_client: SddpClient,
+            search_pattern: str="*",
+            response_wait_time: Optional[float]=None,
+            max_responses: int=0,
+            include_error_responses: bool=False,
+            filter_headers: Optional[Mapping[str, str]]=None
+          ):
+        """Create an async context manager/iterable that sends a multicast search request and returns the responses
+        as they arrive.
+        
+        Parameters:
+            sddp_client:             The SddpClient instance to use for sending the search request and receiving responses.
+            search_pattern:          The search pattern to use. Defaults to "*" (all devices).
+            response_wait_time:      The amount of time (in seconds) to wait for responses to come in. Defaults to
+                                        sddp_client.response_wait_time.
+            max_responses:           The maximum number of responses to return. If 0 (the default), all responses received
+                                        within response_wait_time will be returned.
+            include_error_responses: If True, responses with a non-200 status code will be included in the results.
+                                        Defaults to False.
+            filter_headers:          A mapping of headers to values. If specified, only responses that have all of the
+                                        specified headers with the specified values will be included in the results. Defaults
+                                        to None.
+
+        Usage:
+            async with SddpSearchRequest(sddp_client, ...) as search_request:
+                async for response in search_request:
+                    print(response.datagram.headers)
+                    # It is possible to break out of the loop early if desired; e.g., if you got the response you were looking for..
+        """
+        self.sddp_client = sddp_client
+        self.search_pattern = search_pattern
+        self.response_wait_time = sddp_client.response_wait_time if response_wait_time is None else response_wait_time
+        self.max_responses = max_responses
+        self.include_error_responses = include_error_responses
+        self.dg_subscriber = SddpDatagramSubscriber(self.sddp_client)
+        self.filter_headers = None if filter_headers is None else CaseInsensitiveDict(filter_headers)
+
+    async def __aenter__(self) -> SddpSearchRequest:
+        # It is important that we start the subscriber before we send the search request so that we don't miss any responses.
+        await self.dg_subscriber.__aenter__()
+        try:
+            for socket_binding in self.sddp_client.socket_bindings:
+                search_datagram = SddpDatagram(f"SEARCH {self.search_pattern} SDDP/1.0")
+                search_datagram['Host'] = f"{socket_binding.unicast_addr[0]}:{socket_binding.unicast_addr[1]}"
+                socket_binding.sendto(search_datagram, (self.sddp_client.multicast_address, self.sddp_client.multicast_port))
+            self.end_time = time.monotonic() + self.response_wait_time
+        except BaseException as e:
+            # A call to __aenter__ that raises an exception will not be paired with a call to __aexit__; since we successfully called __aenter__
+            # on the dg_subscriber, we need to call __aexit__ on it to ensure that it is cleaned up properly.
+            await self.dg_subscriber.__aexit__(type(e), e, e.__traceback__)
+            raise
+        return self
+
+    async def __aexit__(
+            self,
+            exc_type: Optional[type[BaseException]],
+            exc: Optional[BaseException],
+            tb: Optional[TracebackType]
+      ) -> bool:
+        return await self.dg_subscriber.__aexit__(exc_type, exc, tb)
+
+    async def iter_responses(self) -> AsyncIterator[SddpResponseInfo]:
+        n = 0
+        while True:
+            if self.max_responses > 0 and n >= self.max_responses:
+                break
+            remaining_time = self.end_time - time.monotonic()
+            if remaining_time <= 0.0:
+                break
+            try:
+                resp_tuple = await asyncio.wait_for(self.dg_subscriber.receive(), remaining_time)
+            except asyncio.TimeoutError:
+                break
+            if resp_tuple is None:
+                break
+            socket_binding, addr, datagram = resp_tuple 
+            m = self._response_statement_re.match(datagram.statement_line)
+            if m:
+                version_major: Optional[int] = None
+                version_minor: Optional[int] = None
+                try:
+                    version_major = int(m.group('version_major'))
+                except ValueError:
+                    pass
+                try:
+                    version_minor = int(m.group('version_minor'))
+                except ValueError:
+                    pass
+                if not version_major is None and not version_minor is None and version_major >= 1:
+                    status_code_str = m.group('status_code')
+                    status_code: Optional[int] = None
+                    try:
+                        status_code = int(status_code_str)
+                    except ValueError:
+                        pass
+                    if not status_code is None:
+                        status = m.group('status')
+                        info = SddpResponseInfo(socket_binding, addr, datagram, f"{version_major}.{version_minor}", status_code, status)
+                        logger.debug(f"Received SDDP response from {addr} on {socket_binding}: version={info.sddp_version}, status_code={status_code}, status={status}, headers={datagram.headers}")
+                        if self.include_error_responses or status_code == 200:
+                            if self.filter_headers is None or all(datagram.headers.get(key, None) == value for key, value in self.filter_headers.items()):
+                                n += 1
+                                yield info
+
+    async def __aiter__(self) -> AsyncIterator[SddpResponseInfo]:
+        return await self.iter_responses()
+
+
 class SddpClient(SddpSocket, AsyncContextManager['SddpClient']):
     """
     An SDDP client that can:
@@ -155,59 +286,83 @@ class SddpClient(SddpSocket, AsyncContextManager['SddpClient']):
            cleanup."""
         pass
 
-    async def search(self, search_pattern: str="*", include_error_responses: bool=False) -> List[SddpResponseInfo]:
-        """Send a search request and return the responses received within the response_wait_time."""
-        responses: List[SddpResponseInfo] = []
-        try:
-            await asyncio.wait_for(asyncio.create_task(self._run_collector_task(responses, search_pattern, include_error_responses)), self.response_wait_time)
-        except asyncio.TimeoutError:
-            pass
-        return responses
+    def search(
+            self,
+            search_pattern: str="*",
+            response_wait_time: Optional[float]=None,
+            max_responses: int=0,
+            include_error_responses: bool=False,
+            filter_headers: Optional[Mapping[str, str]]=None,
+          ) -> SddpSearchRequest:
+        """Create an async context manager/iterable that sends a multicast search request and returns the responses
+           as they arrive.
+        
+        Parameters:
+            search_pattern:          The search pattern to use. Defaults to "*" (all devices).
+            response_wait_time:      The amount of time (in seconds) to wait for responses to come in. Defaults to
+                                        sddp_client.response_wait_time.
+            max_responses:           The maximum number of responses to return. If 0 (the default), all responses received
+                                        within response_wait_time will be returned.
+            include_error_responses: If True, responses with a non-200 status code will be included in the results.
+                                        Defaults to False.
+            filter_headers:          A mapping of headers to values. If specified, only responses that have all of the
+                                        specified headers with the specified values will be included in the results. Defaults
+                                        to None.
 
-    _collector_response_statement_re = re.compile(r'^SDDP/(?P<version_major>[0-9]*)\.(?P<version_minor>[0-9]+) +(?P<status_code>[0-9]+) +(?P<status>.*[^ ]) *$')
-    async def _run_collector_task(self, responses: List[SddpResponseInfo], search_pattern: str, include_error_responses: bool) -> None:
-        logger.debug("response collector task starting")
-
-        try:
-            async with SddpDatagramSubscriber(self) as subscriber:
-                for socket_binding in self.socket_bindings:
-                    search_datagram = SddpDatagram(f"SEARCH {search_pattern} SDDP/1.0")
-                    search_datagram['Host'] = f"{socket_binding.unicast_addr[0]}:{socket_binding.unicast_addr[1]}"
-                    socket_binding.sendto(search_datagram, (self.multicast_address, self.multicast_port))
-                async for socket_binding, addr, datagram in subscriber.iter_datagrams():
-                    m = self._collector_response_statement_re.match(datagram.statement_line)
-                    if m:
-                        version_major: Optional[int] = None
-                        version_minor: Optional[int] = None
-                        try:
-                            version_major = int(m.group('version_major'))
-                        except ValueError:
-                            pass
-                        try:
-                            version_minor = int(m.group('version_minor'))
-                        except ValueError:
-                            pass
-                        if not version_major is None and not version_minor is None and version_major >= 1:
-                            status_code_str = m.group('status_code')
-                            status_code: Optional[int] = None
-                            try:
-                                status_code = int(status_code_str)
-                            except ValueError:
-                                pass
-                            if not status_code is None:
-                                status = m.group('status')
-                                info = SddpResponseInfo(socket_binding, addr, datagram, f"{version_major}.{version_minor}", status_code, status)
-                                logger.debug(f"Response collector received response from {addr} on {socket_binding}: version={info.sddp_version}, status_code={status_code}, status={status}, headers={datagram.headers}")
-                                if include_error_responses or status_code == 200:
-                                    responses.append(info)
-        except asyncio.CancelledError:
-            logger.debug("Response collector task cancelled; exiting")
-            raise
-        except BaseException as e:
-            logger.info(f"Response collector task exiting with exception: {e}")
-            raise
-        finally:
-            logger.debug("Response collector task exiting")
+        Usage:
+            async with sddp_client.search(...) as search_request:
+                async for response in search_request:
+                    print(response.datagram.headers)
+                    # It is possible to break out of the loop early if desired; e.g., if you got the response you were looking for..
+        """
+        return SddpSearchRequest(
+                self,
+                search_pattern=search_pattern,
+                response_wait_time=response_wait_time,
+                max_responses=max_responses,
+                include_error_responses=include_error_responses,
+                filter_headers=filter_headers,
+              )
+    
+    async def simple_search(
+            self,
+            search_pattern: str="*",
+            response_wait_time: Optional[float]=None,
+            max_responses: int=0,
+            include_error_responses: bool=False,
+            filter_headers: Optional[Mapping[str, str]]=None,
+          ) -> List[SddpResponseInfo]:
+        """A simple search that creates a search request, waits for a fixed time for all responses to come in,
+           and returns the responses. Does not allow for early termination of the search when
+           a desired response is received.
+           
+           Early out/incremental results can be obtained by using the search() method.
+           
+        Parameters:
+            sddp_client:             The SddpClient instance to use for sending the search request and receiving responses.
+            search_pattern:          The search pattern to use. Defaults to "*" (all devices).
+            response_wait_time:      The amount of time (in seconds) to wait for responses to come in. Defaults to
+                                        sddp_client.response_wait_time.
+            max_responses:           The maximum number of responses to return. If 0 (the default), all responses received
+                                        within response_wait_time will be returned.
+            include_error_responses: If True, responses with a non-200 status code will be included in the results.
+                                        Defaults to False.
+            filter_headers:          A mapping of headers to values. If specified, only responses that have all of the
+                                        specified headers with the specified values will be included in the results. Defaults
+                                        to None.
+        """
+        results: List[SddpResponseInfo] = []
+        async with self.search(
+                self,
+                search_pattern=search_pattern,
+                response_wait_time=response_wait_time,
+                max_responses=max_responses,
+                include_error_responses=include_error_responses,
+                filter_headers=filter_headers,
+              ) as search_request:
+            async for response in search_request:
+                results.append(response)
+        return results
 
     async def __aenter__(self) -> SddpClient:
         await super().__aenter__()

@@ -208,7 +208,12 @@ class SddpDatagramSubscriber(
         await self.sddp_socket.add_subscriber(self)
         return self
 
-    async def __aexit__(self, exc_type, exc, tb) -> bool:
+    async def __aexit__(
+            self,
+            exc_type: Optional[type[BaseException]],
+            exc: Optional[BaseException],
+            tb: Optional[TracebackType]
+      ) -> bool:
         await self.sddp_socket.remove_subscriber(self)
         self.set_final_result()
         try:
@@ -493,7 +498,12 @@ class SddpSocket(AsyncContextManager[Self]):
         await self.start()
         return self
 
-    async def __aexit__(self, exc_type, exc, tb) -> bool:
+    async def __aexit__(
+            self,
+            exc_type: Optional[type[BaseException]],
+            exc: Optional[BaseException],
+            tb: Optional[TracebackType]
+      ) -> bool:
         if exc is None:
             self.set_final_result()
         else:

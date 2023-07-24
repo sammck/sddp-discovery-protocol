@@ -181,9 +181,9 @@ There is a single command tool `sddp` that is installed with the package.
 $ sddp version
 0.1.0
 $
-``````
+```
 
-#### Discovering all devices on the local subnet
+#### Discovering devices on the local subnet
 
 ```bash
 $ sddp search --help
@@ -245,6 +245,34 @@ $ sddp search
 ]
 ```
 
+If you know the expected value of one or more response headers and are looking for a specific response, you
+can speed up the search in the successful case by applying a header filter and limiting the responses
+to 1; in this case the search will terminate as soon as the relevant response is received:
+
+```bash
+$ sddp search --max-responses 1 -F Type=JVCKENWOOD:Projector
+{
+  "headers": {
+    "Driver": "projector_JVCKENWOOD_DLA-RS3100_NZ8.c4i",
+    "From": "192.168.4.237:1902",
+    "Host": "JVC_PROJECTOR-E0DADC152802",
+    "Manufacturer": "JVCKENWOOD",
+    "Max-Age": 1800,
+    "Model": "DLA-RS3100_NZ8",
+    "Primary-Proxy": "projector",
+    "Proxies": "projector",
+    "Type": "JVCKENWOOD:Projector"
+  },
+  "local_addr": "192.168.4.198:58941",
+  "monotonic_time": 0.093766125,
+  "sddp_version": "1.0",
+  "src_addr": "192.168.4.237:1902",
+  "status": "OK",
+  "status_code": 200,
+  "utc_time": "2023-07-24T22:23:54.175783"
+}
+```
+
 #### Running an SDDP server
 ```bash
 $ sddp server --help
@@ -272,7 +300,27 @@ $ sddp --log-level=debug server
 API
 ---
 
-TBD
+#### Discovering devices on the local subnet
+
+```python
+import asyncio
+import sddp_discovery_protocol as sddp
+
+async def amain(self):
+    async with sddp.SddpClient(...) as client:
+        async with client.search(...) as search_request:
+            async for response_info in search_request:
+                print(response_info.datagram)
+                # It is possible to exit the loop early here if you found what you're looking for
+
+loop = asyncio.new_event_loop()
+try:
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(amain())
+finally:
+    loop.close()
+```
+
 
 Known issues and limitations
 ----------------------------

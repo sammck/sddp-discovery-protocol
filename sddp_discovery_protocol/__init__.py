@@ -30,7 +30,7 @@ from .exceptions import SddpError
 from .sddp_datagram import SddpDatagram
 from .sddp_socket import SddpSocket, SddpSocketBinding, SddpDatagramSubscriber
 from .server import SddpServer, SddpAdvertisementInfo
-from .client import SddpClient, SddpResponseInfo, DEFAULT_RESPONSE_WAIT_TIME
+from .client import SddpClient, SddpSearchRequest, SddpResponseInfo, DEFAULT_RESPONSE_WAIT_TIME
 from .util import CaseInsensitiveDict
 from .constants import SDDP_MULTICAST_ADDRESS, SDDP_PORT
 

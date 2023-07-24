@@ -21,6 +21,7 @@ from sddp_discovery_protocol import (
     __version__ as pkg_version,
     SddpServer,
     SddpClient,
+    SddpSearchRequest,
     SddpDatagramSubscriber,
     SddpDatagram,
     SddpSocketBinding,
@@ -60,6 +61,16 @@ class CommandHandler:
     async def cmd_bare(self) -> int:
         print("A command is required", file=sys.stderr)
         return 1
+    
+    def _parse_arg_headers(self, arg_headers: List[str]) -> CaseInsensitiveDict:
+        headers = CaseInsensitiveDict()
+        for header_assignment in arg_headers:
+            name, value = header_assignment.split('=', 1)
+            if name.lower() in [x.lower() for x in integer_sddp_headers]:
+                value = int(value)
+            headers[name] = value
+        return headers
+        
 
     async def cmd_server(self) -> int:
         async def notify_handler(info: SddpAdvertisementInfo) -> None:
@@ -80,13 +91,7 @@ class CommandHandler:
             print(json.dumps(summary, indent=2, sort_keys=True))
 
         advertise_interval: float = self._args.advertise_interval
-        headers = CaseInsensitiveDict()
-        arg_headers: List[str] = self._args.headers
-        for header_assignment in arg_headers:
-            name, value = header_assignment.split('=', 1)
-            if name.lower() in [x.lower() for x in integer_sddp_headers]:
-                value = int(value)
-            headers[name] = value
+        headers = self._parse_arg_headers(self._args.headers)
         bind_addresses: Optional[List[str]] = self._args.bind_addresses
         if not bind_addresses is None and len(bind_addresses) == 0:
             bind_addresses = None
@@ -124,32 +129,37 @@ class CommandHandler:
         response_wait_time: float = self._args.wait_time
         search_pattern: str = self._args.pattern
         include_error_responses: bool = self._args.include_error_responses
+        max_responses: int = self._args.max_responses
         bind_addresses: Optional[List[str]] = self._args.bind_addresses
         if not bind_addresses is None and len(bind_addresses) == 0:
             bind_addresses = None
+        filter_headers = self._parse_arg_headers(self._args.filter_headers)
         async with SddpClient(response_wait_time=response_wait_time, bind_addresses=bind_addresses) as client:
-            responses = await client.search(search_pattern=search_pattern, include_error_responses=include_error_responses)
-
-        results: List[JsonableDict] = []
-
-        for info in responses:
-            datagram = info.datagram
-            header_dict: Dict[str, str] = dict(datagram.headers)
-            summary: JsonableDict = {
-                "sddp_version": info.sddp_version,
-                "status_code": info.status_code,
-                "status": info.status,
-                "src_addr": f"{info.src_addr[0]}:{info.src_addr[1]}",
-                "local_addr": f"{info.socket_binding.unicast_addr[0]}:{info.socket_binding.unicast_addr[1]}",
-                "headers": header_dict,
-                "monotonic_time": info.monotonic_time,
-                "utc_time": info.utc_time.isoformat(),
-            }
-            if datagram.body is not None and len(datagram.body) > 0:
-                summary["body"] = base64.b64encode(datagram.body).decode('ascii')
-            results.append(summary)
-
-        print(json.dumps(results, indent=2, sort_keys=True))
+            async with SddpSearchRequest(
+                    client,
+                    search_pattern=search_pattern,
+                    response_wait_time=response_wait_time,
+                    max_responses=max_responses,
+                    include_error_responses=include_error_responses,
+                    filter_headers=filter_headers,
+                ) as search_request:
+                async for info in search_request.iter_responses():
+                    datagram = info.datagram
+                    header_dict: Dict[str, str] = dict(datagram.headers)
+                    summary: JsonableDict = {
+                        "sddp_version": info.sddp_version,
+                        "status_code": info.status_code,
+                        "status": info.status,
+                        "src_addr": f"{info.src_addr[0]}:{info.src_addr[1]}",
+                        "local_addr": f"{info.socket_binding.unicast_addr[0]}:{info.socket_binding.unicast_addr[1]}",
+                        "headers": header_dict,
+                        "monotonic_time": info.monotonic_time,
+                        "utc_time": info.utc_time.isoformat(),
+                    }
+                    if datagram.body is not None and len(datagram.body) > 0:
+                        summary["body"] = base64.b64encode(datagram.body).decode('ascii')
+                    print(json.dumps(summary, indent=2, sort_keys=True))
+                    sys.stdout.flush()
 
         return 0
 
@@ -211,6 +221,10 @@ class CommandHandler:
                             help='''The local unicast IP address to bind to. May be repeated. Default: all local non-loopback unicast addresses.''')
         parser_search.add_argument('--include-error-responses', dest="include_error_responses", action='store_true', default=False,
                             help='Include error responses in the output. Default: False')
+        parser_search.add_argument('--max-responses', type=int, default=0,
+                            help='The maximum number of responses to return. Default: 0 (no limit)')
+        parser_search.add_argument('-F', '--filter', dest="filter_headers", action='append', default=[],
+                            help='''A <name>=<value> header that must match a response for the response to be included. May be repeated.''')
         parser_search.set_defaults(func=self.cmd_search)
 
         # ======================= version
