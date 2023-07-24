@@ -303,13 +303,21 @@ API
 #### Discovering devices on the local subnet
 
 ```python
+import logging
 import asyncio
 import sddp_discovery_protocol as sddp
 
-async def amain(self):
-    async with sddp.SddpClient(...) as client:
-        async with client.search(...) as search_request:
-            async for response_info in search_request:
+#logging.basicConfig(level=logging.DEBUG)
+
+async def amain():
+    # all parameters to SddpClient are optional; they allow you to set the IP addresses to bind to, etc.
+    async with sddp.SddpClient() as client:
+        # Entering the client.search() context manager sends the search multicast request and reliably collects responses.
+        # Parameters are optional; they allow you to set search filters, max wait time, max returned responses, etc.
+        async with client.search() as search_request:
+            # search_request.iter_responses() is an async generator that yields SddpResponseInfo objects
+            # as they come in until the max wait time has elapsed or the max number of responses has been received.
+            async for response_info in search_request.iter_responses():
                 print(response_info.datagram)
                 # It is possible to exit the loop early here if you found what you're looking for
 
@@ -321,6 +329,38 @@ finally:
     loop.close()
 ```
 
+#### Running an SDDP server
+
+```python
+import logging
+import asyncio
+import sddp_discovery_protocol as sddp
+
+logging.basicConfig(level=logging.DEBUG)
+
+device_headers = {
+    "Type": "Acme:TestDevice",
+    "Primary-Proxy": "test-device",
+    "Proxies": "test-device",
+    "Manufacturer": "Acme",
+    "Model": "TestDevPlus",
+    "Driver": "test-device_Acme_TestDevPlus.c4i",
+}
+
+async def amain():
+    # The SddpServerContext manager starts the server listening on the multicast port, sending out advertisements,
+    # and responding to search requests.  When the context manager exits, the server will be stopped.
+    async with sddp.SddpServer(device_headers=device_headers) as server:
+        # This will wait forever unless another task stops the server
+        await server.wait_for_done()        
+
+loop = asyncio.new_event_loop()
+try:
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(amain())
+finally:
+    loop.close()
+```
 
 Known issues and limitations
 ----------------------------
