@@ -32,6 +32,7 @@ from .sddp_socket import SddpSocket, SddpSocketBinding, SddpDatagramSubscriber
 from .server import SddpServer, SddpAdvertisementInfo
 from .client import SddpClient, SddpResponseInfo, DEFAULT_RESPONSE_WAIT_TIME
 from .util import CaseInsensitiveDict
+from .constants import SDDP_MULTICAST_ADDRESS, SDDP_PORT
 
 __all__ = [
     '__version__',
@@ -41,5 +42,7 @@ __all__ = [
     'SddpSocket', 'SddpSocketBinding', 'SddpDatagramSubscriber',
     'SddpServer', 'SddpAdvertisementInfo',
     'SddpClient', 'SddpResponseInfo',
-    'CaseInsensitiveDict'
+    'CaseInsensitiveDict',
+    'DEFAULT_RESPONSE_WAIT_TIME',
+    'SDDP_MULTICAST_ADDRESS', 'SDDP_PORT',
 ]
