@@ -1,6 +1,17 @@
-- name: Build and publish to pypi
-  uses: JRubics/poetry-publish@v1.17
-  with:
-    python_version: "3.10"
-    # poetry_version: "==1.1.13" # (PIP version specifier syntax)
-    pypi_token: ${{ secrets.PYPI_TOKEN }}
+name: Publish to PyPi
+
+on:
+  workflow_dispatch: null
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v3
+      - name: Build and publish to pypi
+        uses: JRubics/poetry-publish@v1.17
+        with:
+          python_version: "3.10"
+          # poetry_version: "==1.1.13" # (PIP version specifier syntax)
+          pypi_token: ${{ secrets.PYPI_TOKEN }}
