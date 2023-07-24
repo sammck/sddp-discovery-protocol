@@ -14,10 +14,11 @@ repository = "https://github.com/sammck/sddp-discovery-protocol.git"
 [tool.poetry.dependencies]
 python = "^3.8"
 #argcomplete = "^2.0.0"
-jq = "^1.2.2"
-colorama = "^0.4.4"
+#jq = "^1.2.2"
+#colorama = "^0.4.4"
 typing-extensions = "^4.7.1"
 netifaces-plus = "^0.12.0"
+requests = "^2.31.0"
 
 [tool.poetry.dev-dependencies]
 mypy = "^0.931"
