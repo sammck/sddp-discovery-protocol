@@ -4,7 +4,8 @@ version = "0.1.0"
 description = "Implementation of Control4's Simple Device Discovery Protocol (SDDP)"
 authors = [ "Sam McKelvie <dev@mckelvie.org>" ]
 license = "MIT"
-keywords = [ "Control4", "SDDP", "SSDP", "UPnP", "protocol", "multicast", "UDP", "discovery", "network" ]
+keywords = [ "Control4", "SDDP", "SSDP", "UPnP", "protocol", "multicast", "UDP",
+             "discovery", "network", "automation", "smart-home" ]
 readme = "README.md"
 homepage = "https://github.com/sammck/sddp-discovery-protocol"
 repository = "https://github.com/sammck/sddp-discovery-protocol.git"
