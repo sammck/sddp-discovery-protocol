@@ -89,16 +89,16 @@ class SddpSearchRequest(
        within an AsyncContextManager/AsyncInterable interface."""
 
     _response_statement_re = re.compile(r'^SDDP/(?P<version_major>[0-9]*)\.(?P<version_minor>[0-9]+) +(?P<status_code>[0-9]+) +(?P<status>.*[^ ]) *$')
-    
+
     sddp_client: SddpClient
     search_pattern: str
     include_error_responses: bool
-    
+
     dg_subscriber: SddpDatagramSubscriber
     response_wait_time: float
     max_responses: int
     end_time: float = 0.0
-    filter_headers: Optional[CaseInsensitiveDict[str]] = None
+    filter_headers: Optional[CaseInsensitiveDict[Union[str, int]]] = None
 
     def __init__(
             self,
@@ -107,11 +107,11 @@ class SddpSearchRequest(
             response_wait_time: Optional[float]=None,
             max_responses: int=0,
             include_error_responses: bool=False,
-            filter_headers: Optional[Mapping[str, str]]=None
+            filter_headers: Optional[Mapping[str, Union[str, int]]]=None
           ):
         """Create an async context manager/iterable that sends a multicast search request and returns the responses
         as they arrive.
-        
+
         Parameters:
             sddp_client:             The SddpClient instance to use for sending the search request and receiving responses.
             search_pattern:          The search pattern to use. Defaults to "*" (all devices).
@@ -177,7 +177,7 @@ class SddpSearchRequest(
                 break
             if resp_tuple is None:
                 break
-            socket_binding, addr, datagram = resp_tuple 
+            socket_binding, addr, datagram = resp_tuple
             m = self._response_statement_re.match(datagram.statement_line)
             if m:
                 version_major: Optional[int] = None
@@ -206,8 +206,8 @@ class SddpSearchRequest(
                                 n += 1
                                 yield info
 
-    async def __aiter__(self) -> AsyncIterator[SddpResponseInfo]:
-        return await self.iter_responses()
+    def __aiter__(self) -> AsyncIterator[SddpResponseInfo]:
+        return self.iter_responses()
 
 
 class SddpClient(SddpSocket, AsyncContextManager['SddpClient']):
@@ -296,7 +296,7 @@ class SddpClient(SddpSocket, AsyncContextManager['SddpClient']):
           ) -> SddpSearchRequest:
         """Create an async context manager/iterable that sends a multicast search request and returns the responses
            as they arrive.
-        
+
         Parameters:
             search_pattern:          The search pattern to use. Defaults to "*" (all devices).
             response_wait_time:      The amount of time (in seconds) to wait for responses to come in. Defaults to
@@ -323,7 +323,7 @@ class SddpClient(SddpSocket, AsyncContextManager['SddpClient']):
                 include_error_responses=include_error_responses,
                 filter_headers=filter_headers,
               )
-    
+
     async def simple_search(
             self,
             search_pattern: str="*",
@@ -335,9 +335,9 @@ class SddpClient(SddpSocket, AsyncContextManager['SddpClient']):
         """A simple search that creates a search request, waits for a fixed time for all responses to come in,
            and returns the responses. Does not allow for early termination of the search when
            a desired response is received.
-           
+
            Early out/incremental results can be obtained by using the search() method.
-           
+
         Parameters:
             sddp_client:             The SddpClient instance to use for sending the search request and receiving responses.
             search_pattern:          The search pattern to use. Defaults to "*" (all devices).
@@ -353,7 +353,6 @@ class SddpClient(SddpSocket, AsyncContextManager['SddpClient']):
         """
         results: List[SddpResponseInfo] = []
         async with self.search(
-                self,
                 search_pattern=search_pattern,
                 response_wait_time=response_wait_time,
                 max_responses=max_responses,

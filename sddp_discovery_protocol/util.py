@@ -168,7 +168,7 @@ def get_default_ip_gateway(address_family: socket.AddressFamily | int=socket.AF_
     if "default" in gws:
         default_gateway_infos = gws["default"]
         if netiface_family in default_gateway_infos:
-            gw_ip, gw_interface_name = default_gateway_infos[netiface_family]
+            gw_ip, gw_interface_name = default_gateway_infos[netiface_family][:2]
             return (gw_ip, gw_interface_name)
     return (None, None)
 

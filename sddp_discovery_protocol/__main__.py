@@ -61,22 +61,23 @@ class CommandHandler:
     async def cmd_bare(self) -> int:
         print("A command is required", file=sys.stderr)
         return 1
-    
+
     def _parse_arg_headers(self, arg_headers: List[str]) -> CaseInsensitiveDict:
-        headers = CaseInsensitiveDict()
+        headers: CaseInsensitiveDict[Union[str, int]] = CaseInsensitiveDict()
         for header_assignment in arg_headers:
+            value: Union[str, int]
             name, value = header_assignment.split('=', 1)
             if name.lower() in [x.lower() for x in integer_sddp_headers]:
                 value = int(value)
             headers[name] = value
         return headers
-        
+
 
     async def cmd_server(self) -> int:
         async def notify_handler(info: SddpAdvertisementInfo) -> None:
             results: List[JsonableDict] = []
             datagram = info.datagram
-            header_dict: Dict[str, str] = dict(datagram.headers)
+            header_dict: Dict[str, Union[str, int, float]] = dict(datagram.headers)
             summary: JsonableDict = {
                 "sddp_version": info.sddp_version,
                 "src_addr": f"{info.src_addr[0]}:{info.src_addr[1]}",
@@ -145,7 +146,7 @@ class CommandHandler:
                 ) as search_request:
                 async for info in search_request.iter_responses():
                     datagram = info.datagram
-                    header_dict: Dict[str, str] = dict(datagram.headers)
+                    header_dict: Dict[str, Union[str, int, float]] = dict(datagram.headers)
                     summary: JsonableDict = {
                         "sddp_version": info.sddp_version,
                         "status_code": info.status_code,

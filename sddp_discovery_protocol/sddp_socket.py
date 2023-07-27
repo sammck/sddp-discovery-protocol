@@ -115,6 +115,7 @@ class SddpSocketBinding:
 
     def sendto(self, datagram: SddpDatagram, addr: HostAndPort) -> None:
         logger.debug(f"Sending SddpDatagram via {self} to {addr}: {datagram}")
+        assert not self.transport is None
         self.transport.sendto(datagram.raw_data, addr)
 
     def __str__(self) -> str:
@@ -135,6 +136,7 @@ class _SddpSocketProtocol(asyncio.DatagramProtocol, ABC):
 
     @property
     def sddp_socket(self) -> SddpSocket:
+        assert self.socket_binding.sddp_socket is not None
         return self.socket_binding.sddp_socket
 
     @property
@@ -230,8 +232,8 @@ class SddpDatagramSubscriber(
                 break
             yield result
 
-    async def __aiter__(self) -> AsyncIterator[Tuple[SddpSocketBinding, HostAndPort, SddpDatagram]]:
-        return await self.iter_datagrams()
+    def __aiter__(self) -> AsyncIterator[Tuple[SddpSocketBinding, HostAndPort, SddpDatagram]]:
+        return self.iter_datagrams()
 
     def set_final_result(self) -> None:
         if not self.final_result.done():
@@ -305,7 +307,7 @@ class SddpDatagramSubscriber(
                 # queue is full so waiters will wake up soon
                 pass
 
-class SddpSocket(AsyncContextManager[Self]):
+class SddpSocket(AsyncContextManager['SddpSocket']):
     """
     An abstract async SDDP socket that can:
 

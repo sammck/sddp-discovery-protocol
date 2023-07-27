@@ -123,7 +123,7 @@ class SddpServer(SddpSocket):
     include_loopback: bool = False
     """If True, loopback addresses will be included in the list of local IP addresses to bind to."""
 
-    notify_handlers: Dict[int, SddpServerNotifyHandler] = []
+    notify_handlers: Dict[int, SddpServerNotifyHandler]
     """A set of handlers that will be called when an advertisement notification is received from a remote host,
        indexed by ID number."""
 
@@ -195,7 +195,7 @@ class SddpServer(SddpSocket):
             else:
                 assert address_family == socket.AF_INET
                 mreq = group_bin + bind_bin_addr
-                logger.debug(f"Joining multicast group {self.multicast_address} on {bind_address}; mreq={mreq}")
+                logger.debug(f"Joining multicast group {self.multicast_address} on {bind_address}; mreq={mreq!r}")
                 sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
             socket_binding = SddpSocketBinding(sock, unicast_addr=(bind_address, self.multicast_port))
             await self.add_socket_binding(socket_binding)
@@ -317,6 +317,7 @@ class SddpServer(SddpSocket):
                                 # NOTE: in the future when SDDP protocol is documented, we can filter based on pattern
                                 #       but for now we will always respond.
                                 logger.debug(f"Sddp responder received SEARCH request from {addr} on {socket_binding}: pattern='{pattern}', protocol={statement_protocol}, version={version_major}.{version_minor}")
+                                assert not self.advertise_datagram is None
                                 response = self.advertise_datagram.copy()
                                 response.statement_line = f"{statement_protocol}/{version_major}.{version_minor} 200 OK"
                                 if not 'From' in response:
@@ -338,6 +339,7 @@ class SddpServer(SddpSocket):
         try:
             while not self.final_result.done():
                 for socket_binding in self.socket_bindings:
+                    assert not self.advertise_datagram is None
                     advertise_datagram = self.advertise_datagram.copy()
                     if not 'From' in advertise_datagram:
                         # Fill in the From header with the unicast address that applies to the interface on which the advertisement is being sent
